@@ -1,11 +1,6 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { AppSettings } from './types';
-import { exportToCSV } from './utils/helpers';
-import { useScanner } from './hooks/useScanner';
-import { Dashboard } from './components/Dashboard';
-import { ScanLog } from './components/ScanLog';
-import { ConfigModal } from './components/ConfigModal';
 import { FileDown, RotateCcw, ShieldCheck, TriangleAlert } from 'lucide-react';
 
 const App: React.FC = () => {
