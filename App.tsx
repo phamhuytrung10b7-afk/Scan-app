@@ -14,7 +14,7 @@ export default function App() {
   // --- State ---
   const [targetModel, setTargetModel] = useState<string>('');
   const [scans, setScans] = useState<ScanRecord[]>([]);
-  // Use a Set for O(1) duplicate checking. We maintain it in parallel with 'scans'.
+  // Use a Set for O(1) duplicate checking of VALID codes only.
   const [scannedCodes, setScannedCodes] = useState<Set<string>>(new Set());
   
   const [lastScanStatus, setLastScanStatus] = useState<ScanStatus | 'idle'>('idle');
@@ -34,7 +34,21 @@ export default function App() {
   const handleScan = useCallback((code: string) => {
     // 1. Reset immediate state
     setLastScanCode(code);
+    const now = new Date();
     
+    // Helper function to add record to history
+    const addRecord = (status: ScanStatus) => {
+      const newRecord: ScanRecord = {
+        id: scans.length + 1,
+        code: code,
+        targetModel: targetModel,
+        timestamp: formatDateTime(now),
+        rawTimestamp: now.getTime(),
+        status: status
+      };
+      setScans(prev => [newRecord, ...prev]); // Add to top of list
+    };
+
     // 2. Validate: Target Model Configured?
     if (!targetModel) {
       setLastScanStatus('idle');
@@ -45,40 +59,31 @@ export default function App() {
     }
 
     // 3. Logic: Extract Model / Check Model
-    // Requirement: "Code must contain or link to model info"
-    // Requirement: "If model in code != target model -> Error"
     if (!code.includes(targetModel)) {
       setLastScanStatus('wrong_model');
       setStatusMessage(`Mã không chứa model yêu cầu: "${targetModel}"`);
       playSound('error');
+      addRecord('wrong_model'); // SAVE ERROR TO LIST
       return;
     }
 
     // 4. Logic: Duplicate Check
+    // We check if this code has been successfully scanned before
     if (scannedCodes.has(code)) {
       setLastScanStatus('duplicate');
-      setStatusMessage('Mã này đã được quét trước đó!');
+      setStatusMessage('Mã này đã được quét thành công trước đó!');
       playSound('error');
+      addRecord('duplicate'); // SAVE ERROR TO LIST
       return;
     }
 
     // 5. Success
-    const now = new Date();
-    const newRecord: ScanRecord = {
-      id: scans.length + 1,
-      code: code,
-      targetModel: targetModel,
-      timestamp: formatDateTime(now),
-      rawTimestamp: now.getTime(),
-      status: 'valid'
-    };
-
-    setScans(prev => [newRecord, ...prev]); // Add to top of list
-    setScannedCodes(prev => new Set(prev).add(code));
-    
     setLastScanStatus('valid');
     setStatusMessage('');
     playSound('success');
+    
+    addRecord('valid');
+    setScannedCodes(prev => new Set(prev).add(code)); // Only add VALID codes to the duplicate check set
 
   }, [targetModel, scannedCodes, scans.length]);
 
@@ -111,6 +116,7 @@ export default function App() {
 
   // --- Derived State ---
   const validCount = scans.filter(s => s.status === 'valid').length;
+  const errorCount = scans.filter(s => s.status !== 'valid').length;
 
   return (
     <div className="min-h-screen bg-gray-100 font-sans text-gray-900">
@@ -151,8 +157,8 @@ export default function App() {
             </div>
             
             <DashboardStats 
-              totalValid={scans.length} // Since we only save valid ones per logic
-              totalErrors={0} // We aren't tracking error history persistently based on logic
+              totalValid={validCount} 
+              totalErrors={errorCount}
               targetModel={targetModel}
             />
           </div>
@@ -170,9 +176,9 @@ export default function App() {
         <div>
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-lg font-bold text-gray-800 uppercase tracking-wide flex items-center">
-              Lịch Sử Quét Hợp Lệ
+              Lịch Sử Quét (Toàn Bộ)
               <span className="ml-3 bg-blue-100 text-blue-800 text-xs font-semibold px-2.5 py-0.5 rounded-full">
-                Total: {scans.length}
+                Tổng: {scans.length}
               </span>
             </h2>
           </div>
