@@ -1,5 +1,5 @@
 {
-  "name": "FactoryScan Pro",
-  "description": "A high-performance manufacturing barcode scanner application with duplicate detection, model validation, and timestamp recording.",
+  "name": "ProScan - Manufacturing Scanner",
+  "description": "A robust barcode scanning utility for manufacturing environments with model validation, duplicate checking, and CSV export.",
   "requestFramePermissions": []
 }

@@ -1,22 +1,15 @@
-export type ScanStatus = 'VALID' | 'DUPLICATE' | 'WRONG_MODEL';
+export type ScanStatus = 'valid' | 'duplicate' | 'wrong_model';
 
 export interface ScanRecord {
   id: number;
   code: string;
-  expectedModel: string;
-  timestamp: string; // ISO string
-  formattedTimestamp: string; // yyyy-MM-dd HH:mm:ss
+  targetModel: string;
+  timestamp: string;
   status: ScanStatus;
+  rawTimestamp: number; // For sorting if needed
 }
 
 export interface AppSettings {
-  activeModel: string;
-  allowReset: boolean;
-  operatorName: string;
+  targetModel: string;
+  soundEnabled: boolean;
 }
-
-export const DEFAULT_SETTINGS: AppSettings = {
-  activeModel: 'MODEL-A',
-  allowReset: true,
-  operatorName: 'OP-01',
-};

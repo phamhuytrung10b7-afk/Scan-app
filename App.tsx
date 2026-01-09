@@ -1,292 +1,194 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { ScanRecord, AppSettings, DEFAULT_SETTINGS, ScanStatus } from './types';
-import { formatDateTime, exportToCSV } from './helpers';
-import { playSuccessSound, playErrorSound } from './utils/audio';
-import ScanHistory from './components/ScanHistory';
-import SettingsModal from './components/SettingsModal';
-import { 
-  ScanBarcode, 
-  Download, 
-  Settings as SettingsIcon, 
-  CheckCircle2, 
-  XCircle, 
-  AlertTriangle,
-  RotateCcw
-} from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Settings, Barcode } from 'lucide-react';
+import { ScanInput } from './ScanInput';
+import { StatusDisplay } from './StatusDisplay';
+import { DashboardStats } from './DashboardStats';
+import { ScanTable } from './ScanTable';
+import { SettingsModal } from './SettingsModal';
+import { ScanRecord, ScanStatus } from './types';
+import { playSound } from './sound';
+import { formatDateTime } from './format';
+import { exportToCSV } from './csv';
 
-const App: React.FC = () => {
-  // State
-  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+export default function App() {
+  // --- State ---
+  const [targetModel, setTargetModel] = useState<string>('');
   const [scans, setScans] = useState<ScanRecord[]>([]);
-  const [inputValue, setInputValue] = useState('');
-  const [lastScanStatus, setLastScanStatus] = useState<'idle' | ScanStatus>('idle');
-  const [lastScannedCode, setLastScannedCode] = useState<string>('');
+  // Use a Set for O(1) duplicate checking. We maintain it in parallel with 'scans'.
+  const [scannedCodes, setScannedCodes] = useState<Set<string>>(new Set());
+  
+  const [lastScanStatus, setLastScanStatus] = useState<ScanStatus | 'idle'>('idle');
+  const [lastScanCode, setLastScanCode] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string>('');
+  
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [feedbackMessage, setFeedbackMessage] = useState<string>('Ready to scan');
 
-  // Refs
-  const inputRef = useRef<HTMLInputElement>(null);
-  const scanContainerRef = useRef<HTMLDivElement>(null);
-
-  // Derived state
-  const validCount = scans.filter(s => s.status === 'VALID').length;
-  const lastScan = scans.length > 0 ? scans[scans.length - 1] : null;
-
-  // Focus management: Always keep focus on input unless modal is open
+  // Load target model from localStorage on mount
   useEffect(() => {
-    const focusInput = () => {
-      if (!isSettingsOpen && inputRef.current) {
-        inputRef.current.focus();
-      }
-    };
+    const savedModel = localStorage.getItem('proscan_target_model');
+    if (savedModel) setTargetModel(savedModel);
+  }, []);
 
-    // Initial focus
-    focusInput();
+  // --- Logic ---
+  
+  const handleScan = useCallback((code: string) => {
+    // 1. Reset immediate state
+    setLastScanCode(code);
+    
+    // 2. Validate: Target Model Configured?
+    if (!targetModel) {
+      setLastScanStatus('idle');
+      setStatusMessage('Vui lòng cấu hình Model trước khi quét!');
+      playSound('error');
+      setIsSettingsOpen(true);
+      return;
+    }
 
-    // Re-focus on click anywhere (unless interacting with buttons)
-    const handleGlobalClick = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      // Don't steal focus if clicking on buttons or modal
-      if (
-        !isSettingsOpen && 
-        !target.closest('button') && 
-        !target.closest('.no-autofocus')
-      ) {
-        focusInput();
-      }
-    };
+    // 3. Logic: Extract Model / Check Model
+    // Requirement: "Code must contain or link to model info"
+    // Requirement: "If model in code != target model -> Error"
+    if (!code.includes(targetModel)) {
+      setLastScanStatus('wrong_model');
+      setStatusMessage(`Mã không chứa model yêu cầu: "${targetModel}"`);
+      playSound('error');
+      return;
+    }
 
-    document.addEventListener('click', handleGlobalClick);
-    return () => document.removeEventListener('click', handleGlobalClick);
-  }, [isSettingsOpen]);
+    // 4. Logic: Duplicate Check
+    if (scannedCodes.has(code)) {
+      setLastScanStatus('duplicate');
+      setStatusMessage('Mã này đã được quét trước đó!');
+      playSound('error');
+      return;
+    }
 
-  // Main Scan Logic
-  const handleScan = (e: React.FormEvent) => {
-    e.preventDefault();
-    const rawCode = inputValue.trim();
-
-    if (!rawCode) return;
-
+    // 5. Success
     const now = new Date();
     const newRecord: ScanRecord = {
       id: scans.length + 1,
-      code: rawCode,
-      expectedModel: settings.activeModel,
-      timestamp: now.toISOString(),
-      formattedTimestamp: formatDateTime(now),
-      status: 'VALID', // Default, will change
+      code: code,
+      targetModel: targetModel,
+      timestamp: formatDateTime(now),
+      rawTimestamp: now.getTime(),
+      status: 'valid'
     };
 
-    // Validation 1: Model Match (Contains or Starts With)
-    // We normalize to UpperCase for comparison to be robust
-    const normalizedCode = rawCode.toUpperCase();
-    const normalizedModel = settings.activeModel.toUpperCase();
+    setScans(prev => [newRecord, ...prev]); // Add to top of list
+    setScannedCodes(prev => new Set(prev).add(code));
     
-    // Logic: The code must include the model identifier
-    const isModelMatch = normalizedCode.includes(normalizedModel);
+    setLastScanStatus('valid');
+    setStatusMessage('');
+    playSound('success');
 
-    // Validation 2: Duplicate Check
-    const isDuplicate = scans.some(s => s.code === rawCode && s.status === 'VALID');
+  }, [targetModel, scannedCodes, scans.length]);
 
-    let status: ScanStatus = 'VALID';
-    let message = 'Scan Successful';
-
-    if (!isModelMatch) {
-      status = 'WRONG_MODEL';
-      message = 'Wrong Model - Scan Rejected';
-      playErrorSound();
-    } else if (isDuplicate) {
-      status = 'DUPLICATE';
-      message = 'Duplicate Code - Already Scanned';
-      playErrorSound();
-    } else {
-      status = 'VALID';
-      message = 'OK';
-      playSuccessSound();
-    }
-
-    newRecord.status = status;
-
-    // Update State
-    setScans(prev => [...prev, newRecord]);
-    setLastScanStatus(status);
-    setLastScannedCode(rawCode);
-    setFeedbackMessage(message);
-    setInputValue(''); // Auto clear
-
-    // Re-focus immediately
-    if (inputRef.current) inputRef.current.focus();
-  };
-
-  // Helper styles based on status
-  const getStatusColor = () => {
-    switch (lastScanStatus) {
-      case 'VALID': return 'bg-green-600 border-green-700';
-      case 'DUPLICATE': return 'bg-orange-500 border-orange-600';
-      case 'WRONG_MODEL': return 'bg-red-600 border-red-700';
-      default: return 'bg-slate-700 border-slate-800';
+  const handleSaveSettings = (newModel: string) => {
+    if (newModel.trim()) {
+      setTargetModel(newModel.trim());
+      localStorage.setItem('proscan_target_model', newModel.trim());
+      // Reset status when model changes to clear old error states
+      setLastScanStatus('idle');
+      setStatusMessage('');
     }
   };
+
+  const handleResetData = () => {
+    setScans([]);
+    setScannedCodes(new Set());
+    setLastScanStatus('idle');
+    setLastScanCode(null);
+    setStatusMessage('Dữ liệu đã được đặt lại.');
+  };
+
+  const handleExport = () => {
+    if (scans.length === 0) {
+      alert('Không có dữ liệu để xuất.');
+      return;
+    }
+    const timestamp = formatDateTime(new Date()).replace(/[: ]/g, '-');
+    exportToCSV(scans, `ScanReport_${targetModel}_${timestamp}.csv`);
+  };
+
+  // --- Derived State ---
+  const validCount = scans.filter(s => s.status === 'valid').length;
 
   return (
-    <div className="flex flex-col h-screen w-full bg-slate-100 font-sans">
+    <div className="min-h-screen bg-gray-100 font-sans text-gray-900">
       
-      {/* 1. Top Header */}
-      <header className="bg-slate-900 text-white p-4 shadow-lg flex justify-between items-center z-20">
-        <div className="flex items-center gap-3">
-          <div className="bg-blue-500 p-2 rounded-lg">
-            <ScanBarcode size={28} className="text-white" />
+      {/* Header */}
+      <header className="bg-slate-800 text-white shadow-lg sticky top-0 z-20">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+            <Barcode className="w-8 h-8 text-blue-400" />
+            <h1 className="text-xl font-bold tracking-wider">PRO-SCAN <span className="text-blue-400">MFG</span></h1>
           </div>
-          <div>
-            <h1 className="text-xl font-bold tracking-tight">FactoryScan Pro</h1>
-            <div className="text-xs text-slate-400 flex gap-4">
-              <span>OP: <span className="text-white">{settings.operatorName}</span></span>
-              <span>Model: <span className="text-yellow-400 font-mono font-bold">{settings.activeModel}</span></span>
-            </div>
+          <div className="flex items-center space-x-4">
+             {/* Clock or minimal info could go here */}
+             <button 
+               onClick={() => setIsSettingsOpen(true)}
+               className="p-2 rounded-full hover:bg-slate-700 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-400"
+               title="Cài đặt"
+             >
+               <Settings className="w-6 h-6" />
+             </button>
           </div>
-        </div>
-        
-        <div className="flex gap-2 no-autofocus">
-           <button 
-            onClick={() => exportToCSV(scans, settings.activeModel)}
-            className="flex items-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-md transition-colors border border-slate-600 text-sm font-medium"
-            title="Export CSV"
-          >
-            <Download size={16} /> Export
-          </button>
-          <button 
-            onClick={() => setIsSettingsOpen(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-md transition-colors text-sm font-bold shadow-md"
-          >
-            <SettingsIcon size={16} /> Settings
-          </button>
         </div>
       </header>
 
-      {/* Main Content Grid */}
-      <main className="flex-1 p-4 grid grid-cols-1 lg:grid-cols-12 gap-4 overflow-hidden">
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
         
-        {/* Left Column: Input & Status (5 cols) */}
-        <div className="lg:col-span-5 flex flex-col gap-4 overflow-hidden">
-          
-          {/* A. Status Board (Big Visual Feedback) */}
-          <div 
-            className={`
-              flex-1 rounded-2xl shadow-xl border-b-8 flex flex-col items-center justify-center text-center p-6 transition-colors duration-200
-              ${getStatusColor()}
-            `}
-          >
-            <div className="text-white opacity-90 mb-2 font-semibold uppercase tracking-widest text-sm">
-              Current Status
+        {/* Top Section: Input & Status */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="flex flex-col space-y-6">
+            <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+               <label className="block text-sm font-bold text-gray-700 mb-2 uppercase tracking-wide">
+                 Khu Vực Quét Mã (Barcode Input)
+               </label>
+               <ScanInput onScan={handleScan} isDisabled={isSettingsOpen} />
+               <p className="mt-3 text-xs text-gray-400 italic">
+                 * Hệ thống tự động ghi nhận khi nhấn Enter hoặc máy quét gửi lệnh kết thúc.
+               </p>
             </div>
             
-            {lastScanStatus === 'idle' && (
-              <div className="text-slate-300 flex flex-col items-center animate-pulse">
-                <ScanBarcode size={64} className="mb-4 opacity-50" />
-                <div className="text-3xl font-bold">Ready to Scan</div>
-              </div>
-            )}
-
-            {lastScanStatus === 'VALID' && (
-              <div className="text-white animate-in zoom-in duration-300">
-                <CheckCircle2 size={96} className="mx-auto mb-4 text-green-200" />
-                <div className="text-5xl font-black mb-2">OK</div>
-                <div className="text-xl font-medium text-green-100">{lastScannedCode}</div>
-              </div>
-            )}
-
-            {lastScanStatus === 'DUPLICATE' && (
-              <div className="text-white animate-in shake duration-300">
-                <AlertTriangle size={96} className="mx-auto mb-4 text-orange-200" />
-                <div className="text-4xl font-black mb-2">DUPLICATE</div>
-                <div className="text-lg font-medium text-orange-100">Code already scanned</div>
-              </div>
-            )}
-
-            {lastScanStatus === 'WRONG_MODEL' && (
-              <div className="text-white animate-in shake duration-300">
-                <XCircle size={96} className="mx-auto mb-4 text-red-200" />
-                <div className="text-4xl font-black mb-2">WRONG MODEL</div>
-                <div className="text-lg font-medium text-red-100">Expected: {settings.activeModel}</div>
-              </div>
-            )}
+            <DashboardStats 
+              totalValid={scans.length} // Since we only save valid ones per logic
+              totalErrors={0} // We aren't tracking error history persistently based on logic
+              targetModel={targetModel}
+            />
           </div>
 
-          {/* B. Input Field (Sticky/Always visible) */}
-          <div className="bg-white p-6 rounded-xl shadow-md border border-slate-200">
-            <label className="block text-sm font-bold text-slate-500 mb-2 uppercase tracking-wide">
-              Scan Input
-            </label>
-            <form onSubmit={handleScan} className="relative">
-              <input
-                ref={inputRef}
-                type="text"
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                onBlur={() => {
-                  // Optional: Visual cue that focus is lost
-                }}
-                className="w-full h-16 pl-4 pr-4 text-3xl font-mono font-bold text-slate-900 border-4 border-slate-300 rounded-lg focus:border-blue-500 focus:ring-4 focus:ring-blue-100 focus:outline-none transition-all placeholder-slate-300"
-                placeholder="Scan here..."
-                autoComplete="off"
-                autoFocus
-              />
-              <div className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400">
-                <span className="text-xs font-semibold bg-slate-100 px-2 py-1 rounded border border-slate-200">ENTER</span>
-              </div>
-            </form>
-            <div className="mt-2 text-center text-xs text-slate-400">
-              Input field auto-clears after scan.
-            </div>
-          </div>
-
-          {/* C. Quick Stats */}
-          <div className="bg-slate-800 text-white p-6 rounded-xl shadow-md flex justify-between items-center">
-            <div>
-              <div className="text-slate-400 text-sm font-bold uppercase">Total Valid</div>
-              <div className="text-4xl font-mono font-bold text-green-400">{validCount}</div>
-            </div>
-            <div className="text-right">
-              <div className="text-slate-400 text-sm font-bold uppercase">Last Scan Time</div>
-              <div className="text-xl font-mono text-white">
-                 {lastScan ? lastScan.formattedTimestamp.split(' ')[1] : '--:--:--'}
-              </div>
-            </div>
+          <div>
+             <StatusDisplay 
+               lastScanStatus={lastScanStatus}
+               lastScanCode={lastScanCode}
+               message={statusMessage}
+             />
           </div>
         </div>
 
-        {/* Right Column: History Table (7 cols) */}
-        <div className="lg:col-span-7 h-full overflow-hidden">
-          <ScanHistory history={scans} />
+        {/* Bottom Section: Data Table */}
+        <div>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-bold text-gray-800 uppercase tracking-wide flex items-center">
+              Lịch Sử Quét Hợp Lệ
+              <span className="ml-3 bg-blue-100 text-blue-800 text-xs font-semibold px-2.5 py-0.5 rounded-full">
+                Total: {scans.length}
+              </span>
+            </h2>
+          </div>
+          <ScanTable scans={scans} />
         </div>
+
       </main>
 
-      {/* Settings Modal */}
       <SettingsModal 
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
-        currentSettings={settings}
-        onSave={setSettings}
-        onResetCounts={() => {
-          setScans([]);
-          setLastScanStatus('idle');
-          setLastScannedCode('');
-        }}
+        currentModel={targetModel}
+        onSave={handleSaveSettings}
+        onResetData={handleResetData}
+        onExport={handleExport}
       />
-      
-      {/* Global Styles for Animations */}
-      <style>{`
-        @keyframes shake {
-          0%, 100% { transform: translateX(0); }
-          25% { transform: translateX(-5px); }
-          75% { transform: translateX(5px); }
-        }
-        .animate-in.shake {
-          animation: shake 0.4s ease-in-out;
-        }
-      `}</style>
     </div>
   );
-};
-
-export default App;
+}

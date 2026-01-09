@@ -1,122 +1,97 @@
-import React, { useState, useEffect } from 'react';
-import { AppSettings } from '../types';
-import { Settings, X, Save } from 'lucide-react';
+import React, { useState } from 'react';
+import { X, Save, Trash2, Download } from 'lucide-react';
 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
-  currentSettings: AppSettings;
-  onSave: (settings: AppSettings) => void;
-  onResetCounts: () => void;
+  currentModel: string;
+  onSave: (newModel: string) => void;
+  onResetData: () => void;
+  onExport: () => void;
 }
 
-const SettingsModal: React.FC<SettingsModalProps> = ({ 
-  isOpen, 
-  onClose, 
-  currentSettings, 
-  onSave, 
-  onResetCounts 
+export const SettingsModal: React.FC<SettingsModalProps> = ({ 
+  isOpen, onClose, currentModel, onSave, onResetData, onExport 
 }) => {
-  const [formData, setFormData] = useState<AppSettings>(currentSettings);
-
-  // Sync state when opening
-  useEffect(() => {
-    if (isOpen) {
-      setFormData(currentSettings);
-    }
-  }, [isOpen, currentSettings]);
+  const [modelInput, setModelInput] = useState(currentModel);
 
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-      <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden animate-in fade-in zoom-in duration-200">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-md mx-4">
+        <div className="flex items-center justify-between px-6 py-4 border-b">
+          <h3 className="text-lg font-bold text-gray-900">Cấu Hình Sản Xuất</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-500">
+            <X className="w-6 h-6" />
+          </button>
+        </div>
         
-        <div className="bg-slate-800 p-4 flex justify-between items-center text-white">
-          <h2 className="text-xl font-bold flex items-center gap-2">
-            <Settings size={24} /> Configuration
-          </h2>
-          <button onClick={onClose} className="hover:bg-slate-700 p-2 rounded-full transition-colors">
-            <X size={20} />
-          </button>
-        </div>
-
-        <div className="p-6 space-y-6">
+        <div className="px-6 py-6 space-y-6">
           
-          {/* Active Model */}
+          {/* Model Setting */}
           <div>
-            <label className="block text-sm font-bold text-slate-700 mb-2">
-              Active Production Model
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Mã Model Hiện Tại (Bắt buộc)
             </label>
-            <div className="text-xs text-slate-500 mb-2">
-              Codes must start with or contain this string to be valid.
-            </div>
-            <input 
-              type="text" 
-              value={formData.activeModel}
-              onChange={(e) => setFormData(prev => ({ ...prev, activeModel: e.target.value.toUpperCase() }))}
-              className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-lg uppercase"
-              placeholder="e.g. MODEL-A"
+            <input
+              type="text"
+              value={modelInput}
+              onChange={(e) => setModelInput(e.target.value.toUpperCase())} // Auto uppercase
+              className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2 border"
+              placeholder="Ví dụ: ABC-2024"
             />
-          </div>
-
-          {/* Operator */}
-          <div>
-            <label className="block text-sm font-bold text-slate-700 mb-2">
-              Operator ID / Name
-            </label>
-            <input 
-              type="text" 
-              value={formData.operatorName}
-              onChange={(e) => setFormData(prev => ({ ...prev, operatorName: e.target.value }))}
-              className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-            />
-          </div>
-
-          <hr className="border-slate-200" />
-
-          {/* Reset Zone */}
-          <div className="bg-red-50 p-4 rounded-lg border border-red-100">
-            <h3 className="text-red-800 font-bold text-sm mb-2">Danger Zone</h3>
-            <p className="text-red-600 text-xs mb-3">
-              Resetting will clear all scan history and counters. This cannot be undone.
+            <p className="mt-1 text-xs text-gray-500">
+              Mã scan phải chứa chuỗi này để được coi là hợp lệ.
             </p>
-            <button 
-              onClick={() => {
-                if (window.confirm('Are you sure you want to delete all scan records?')) {
-                  onResetCounts();
-                  onClose();
-                }
-              }}
-              className="px-4 py-2 bg-white border border-red-300 text-red-700 font-semibold rounded hover:bg-red-100 text-sm transition-colors"
-            >
-              Reset All Data
-            </button>
           </div>
 
+          <div className="border-t pt-4">
+            <h4 className="text-sm font-bold text-gray-900 mb-3">Tác vụ dữ liệu</h4>
+            <div className="flex flex-col gap-3">
+              <button 
+                onClick={onExport}
+                className="flex items-center justify-center w-full px-4 py-2 text-sm font-medium text-blue-700 bg-blue-100 rounded-md hover:bg-blue-200"
+              >
+                <Download className="w-4 h-4 mr-2" />
+                Xuất báo cáo Excel/CSV
+              </button>
+
+              <button 
+                onClick={() => {
+                  if(window.confirm('CẢNH BÁO: Hành động này sẽ xóa toàn bộ lịch sử quét. Bạn có chắc chắn không?')) {
+                    onResetData();
+                    onClose();
+                  }
+                }}
+                className="flex items-center justify-center w-full px-4 py-2 text-sm font-medium text-red-700 bg-red-100 rounded-md hover:bg-red-200"
+              >
+                <Trash2 className="w-4 h-4 mr-2" />
+                Xóa toàn bộ dữ liệu (Reset)
+              </button>
+            </div>
+          </div>
         </div>
 
-        <div className="bg-slate-100 p-4 flex justify-end gap-3 border-t border-slate-200">
-          <button 
+        <div className="px-6 py-4 bg-gray-50 rounded-b-lg flex justify-end">
+          <button
             onClick={onClose}
-            className="px-5 py-2 text-slate-600 font-semibold hover:bg-slate-200 rounded-lg transition-colors"
+            className="px-4 py-2 mr-3 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md shadow-sm hover:bg-gray-50"
           >
-            Cancel
+            Hủy
           </button>
-          <button 
+          <button
             onClick={() => {
-              onSave(formData);
+              onSave(modelInput);
               onClose();
             }}
-            className="px-6 py-2 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 shadow-md flex items-center gap-2 transition-colors"
+            className="flex items-center px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md shadow-sm hover:bg-blue-700"
           >
-            <Save size={18} /> Save Changes
+            <Save className="w-4 h-4 mr-2" />
+            Lưu Cấu Hình
           </button>
         </div>
-
       </div>
     </div>
   );
 };
-
-export default SettingsModal;
