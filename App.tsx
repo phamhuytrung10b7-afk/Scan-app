@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { ScanRecord, AppSettings, DEFAULT_SETTINGS, ScanStatus } from './types';
-import { formatDateTime, exportToCSV } from 'helpers';
+import { formatDateTime, exportToCSV } from './helpers';
 import { playSuccessSound, playErrorSound } from './utils/audio';
 import ScanHistory from './components/ScanHistory';
 import SettingsModal from './components/SettingsModal';
