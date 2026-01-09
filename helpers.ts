@@ -1,42 +1,45 @@
-
 import { ScanRecord } from '../types';
 
-export const getCurrentTimestamp = (): string => {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  const hours = String(now.getHours()).padStart(2, '0');
-  const minutes = String(now.getMinutes()).padStart(2, '0');
-  const seconds = String(now.getSeconds()).padStart(2, '0');
+/**
+ * Formats a date object to yyyy-MM-dd HH:mm:ss
+ */
+export const formatDateTime = (date: Date): string => {
+  const pad = (num: number) => num.toString().padStart(2, '0');
   
+  const year = date.getFullYear();
+  const month = pad(date.getMonth() + 1);
+  const day = pad(date.getDate());
+  const hours = pad(date.getHours());
+  const minutes = pad(date.getMinutes());
+  const seconds = pad(date.getSeconds());
+
   return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 };
 
-export const exportToCSV = (records: ScanRecord[]) => {
-  if (records.length === 0) return;
-
-  const headers = ['No.', 'Scanned Code', 'Model Name', 'Scan Date & Time', 'Status'];
+/**
+ * Exports scan records to CSV
+ */
+export const exportToCSV = (records: ScanRecord[], activeModel: string) => {
+  const headers = ['Index', 'Scanned Code', 'Expected Model', 'Scan Timestamp', 'Status'];
   
-  // Wrap values in quotes to prevent CSV breakage if data contains commas
-  const rows = records.map((r, index) => [
-    `"${records.length - index}"`,
-    `"${r.code}"`,
-    `"${r.model}"`,
-    `"${r.timestamp}"`,
-    `"${r.status}"`
+  const rows = records.map(r => [
+    r.id,
+    `"${r.code.replace(/"/g, '""')}"`, // Escape quotes
+    r.expectedModel,
+    r.formattedTimestamp,
+    r.status
   ]);
 
   const csvContent = [
     headers.join(','),
-    ...rows.map(e => e.join(','))
+    ...rows.map(row => row.join(','))
   ].join('\n');
 
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.setAttribute('href', url);
-  link.setAttribute('download', `scan_report_${new Date().toISOString().split('T')[0]}_${Date.now()}.csv`);
+  link.setAttribute('download', `scan_report_${activeModel}_${new Date().toISOString().slice(0,10)}.csv`);
   link.style.visibility = 'hidden';
   document.body.appendChild(link);
   link.click();

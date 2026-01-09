@@ -1,22 +1,22 @@
-
-export enum ScanStatus {
-  VALID = 'VALID',
-  DUPLICATE = 'DUPLICATE',
-  WRONG_MODEL = 'WRONG_MODEL',
-  INVALID = 'INVALID'
-}
+export type ScanStatus = 'VALID' | 'DUPLICATE' | 'WRONG_MODEL';
 
 export interface ScanRecord {
-  id: string;
+  id: number;
   code: string;
-  model: string;
-  timestamp: string;
+  expectedModel: string;
+  timestamp: string; // ISO string
+  formattedTimestamp: string; // yyyy-MM-dd HH:mm:ss
   status: ScanStatus;
-  errorMessage?: string;
 }
 
 export interface AppSettings {
   activeModel: string;
+  allowReset: boolean;
   operatorName: string;
-  shift: string;
 }
+
+export const DEFAULT_SETTINGS: AppSettings = {
+  activeModel: 'MODEL-A',
+  allowReset: true,
+  operatorName: 'OP-01',
+};

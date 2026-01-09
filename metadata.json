@@ -1,5 +1,5 @@
 {
-  "name": "Industrial Scan Master",
-  "description": "A high-performance manufacturing scan processing application designed for rapid barcode/QR entry with real-time model validation, duplicate prevention, and CSV export capabilities.",
+  "name": "FactoryScan Pro",
+  "description": "A high-performance manufacturing barcode scanner application with duplicate detection, model validation, and timestamp recording.",
   "requestFramePermissions": []
 }
