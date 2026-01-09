@@ -22,25 +22,34 @@ const App: React.FC = () => {
   const { history, feedback, processScan, resetBatch, validCount } = useScanner(settings);
   
   const inputRef = useRef<HTMLInputElement>(null);
-  const bufferCleanup = useRef<number | null>(null);
+  const bufferCleanup = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const ensureFocus = useCallback(() => {
-    if (!isConfigOpen) {
-      inputRef.current?.focus();
+    if (!isConfigOpen && inputRef.current) {
+      inputRef.current.focus();
       setIsFocused(true);
     }
   }, [isConfigOpen]);
 
+  // Global click to refocus
   useEffect(() => {
-    window.addEventListener('click', ensureFocus);
+    const handleWindowClick = () => ensureFocus();
+    window.addEventListener('click', handleWindowClick);
     ensureFocus();
-    return () => window.removeEventListener('click', ensureFocus);
+    return () => {
+      window.removeEventListener('click', handleWindowClick);
+      if (bufferCleanup.current) clearTimeout(bufferCleanup.current);
+    };
   }, [ensureFocus]);
 
+  // Handle scanner input buffer cleanup
   useEffect(() => {
     if (inputValue.length > 0) {
-      if (bufferCleanup.current) window.clearTimeout(bufferCleanup.current);
-      bufferCleanup.current = window.setTimeout(() => setInputValue(''), 2000);
+      if (bufferCleanup.current) clearTimeout(bufferCleanup.current);
+      bufferCleanup.current = setTimeout(() => {
+        setInputValue('');
+        bufferCleanup.current = null;
+      }, 2000);
     }
   }, [inputValue]);
 
@@ -62,7 +71,8 @@ const App: React.FC = () => {
         onKeyDown={handleKeyDown}
         onBlur={() => {
           setIsFocused(false);
-          setTimeout(ensureFocus, 50);
+          // Small delay to allow focus to actually shift if needed (e.g., to an input in the modal)
+          setTimeout(ensureFocus, 100);
         }}
         autoFocus
       />
@@ -74,40 +84,40 @@ const App: React.FC = () => {
         onOpenConfig={() => setIsConfigOpen(true)}
       />
 
-      {/* Live Buffer */}
-      {inputValue.length > 0 && (
-        <div className="mb-6 bg-yellow-50 border-2 border-yellow-200 p-4 rounded-xl flex items-center justify-between animate-in slide-in-from-top-2">
+      {/* Live Buffer Preview */}
+      <div className={`transition-all duration-200 overflow-hidden ${inputValue.length > 0 ? 'h-24 mb-6 opacity-100' : 'h-0 opacity-0'}`}>
+        <div className="bg-yellow-50 border-2 border-yellow-200 p-4 rounded-xl flex items-center justify-between shadow-sm">
           <div className="flex items-center gap-4 text-yellow-800 font-black uppercase text-sm tracking-widest">
             <div className="w-2 h-2 bg-yellow-500 rounded-full animate-ping" />
-            Receiving Data...
+            Scanner Input Detected
           </div>
-          <span className="text-3xl font-mono font-black text-yellow-900">{inputValue}</span>
+          <span className="text-3xl font-mono font-black text-yellow-900 tracking-tighter">{inputValue}</span>
         </div>
-      )}
+      </div>
 
-      {/* Feedback Notification */}
-      {feedback.type && (
-        <div className={`mb-6 p-6 rounded-xl flex items-center gap-4 border-4 shadow-xl transition-all animate-in zoom-in duration-200 ${
+      {/* Status Feedback Notification */}
+      <div className={`transition-all duration-300 transform ${feedback.type ? 'scale-100 opacity-100 translate-y-0 mb-6' : 'scale-95 opacity-0 -translate-y-4 h-0 overflow-hidden'}`}>
+        <div className={`p-6 rounded-xl flex items-center gap-4 border-4 shadow-xl ${
           feedback.type === 'success' ? 'bg-green-600 border-green-700 text-white' : 'bg-red-600 border-red-700 text-white'
         }`}>
           {feedback.type === 'success' ? <ShieldCheck className="w-10 h-10" /> : <TriangleAlert className="w-10 h-10" />}
           <span className="text-3xl font-black uppercase tracking-tight">{feedback.message}</span>
         </div>
-      )}
+      </div>
 
-      {/* Action Controls */}
+      {/* Master Controls */}
       <div className="flex flex-wrap gap-4 mb-6">
         <button 
           onClick={() => exportToCSV(history)}
           className="bg-gray-900 hover:bg-black text-white font-black py-4 px-8 rounded-xl shadow-lg transition-all flex items-center gap-3 active:scale-95"
         >
-          <FileDown className="w-6 h-6" /> Export Report
+          <FileDown className="w-6 h-6" /> Export CSV Report
         </button>
         <button 
-          onClick={() => { if(confirm('Reset current batch?')) resetBatch(); }}
+          onClick={() => { if(confirm('Are you sure? This will clear all records and reset the counter.')) resetBatch(); }}
           className="bg-white border-2 border-red-100 text-red-600 hover:bg-red-50 font-black py-4 px-8 rounded-xl transition-all active:scale-95 flex items-center gap-3"
         >
-          <RotateCcw className="w-6 h-6" /> Reset Batch
+          <RotateCcw className="w-6 h-6" /> Reset Current Batch
         </button>
       </div>
 

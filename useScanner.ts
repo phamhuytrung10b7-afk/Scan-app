@@ -1,20 +1,27 @@
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { ScanRecord, ScanStatus, AppSettings } from '../types';
 import { getCurrentTimestamp } from '../utils/helpers';
-import { soundService } from '../services/soundService';
 
 export const useScanner = (settings: AppSettings) => {
   const [history, setHistory] = useState<ScanRecord[]>([]);
   const [scannedSet, setScannedSet] = useState<Set<string>>(new Set());
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' | null }>({ message: '', type: null });
-  const feedbackTimeout = useRef<number | null>(null);
+  const feedbackTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (feedbackTimeout.current) clearTimeout(feedbackTimeout.current);
+    };
+  }, []);
 
   const showFeedback = (message: string, type: 'success' | 'error') => {
-    if (feedbackTimeout.current) window.clearTimeout(feedbackTimeout.current);
+    if (feedbackTimeout.current) clearTimeout(feedbackTimeout.current);
     setFeedback({ message, type });
-    feedbackTimeout.current = window.setTimeout(() => {
+    feedbackTimeout.current = setTimeout(() => {
       setFeedback({ message: '', type: null });
+      feedbackTimeout.current = null;
     }, 3000);
   };
 
@@ -40,11 +47,13 @@ export const useScanner = (settings: AppSettings) => {
     }
 
     if (status === ScanStatus.VALID) {
-      setScannedSet(prev => new Set(prev).add(trimmedCode));
-      soundService.playSuccess();
-      showFeedback(`OK: ${trimmedCode}`, 'success');
+      setScannedSet(prev => {
+        const next = new Set(prev);
+        next.add(trimmedCode);
+        return next;
+      });
+      showFeedback(`Valid Scan: ${trimmedCode}`, 'success');
     } else {
-      soundService.playError();
       showFeedback(errorMessage, 'error');
     }
 

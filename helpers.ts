@@ -14,13 +14,17 @@ export const getCurrentTimestamp = (): string => {
 };
 
 export const exportToCSV = (records: ScanRecord[]) => {
+  if (records.length === 0) return;
+
   const headers = ['No.', 'Scanned Code', 'Model Name', 'Scan Date & Time', 'Status'];
+  
+  // Wrap values in quotes to prevent CSV breakage if data contains commas
   const rows = records.map((r, index) => [
-    index + 1,
-    r.code,
-    r.model,
-    r.timestamp,
-    r.status
+    `"${records.length - index}"`,
+    `"${r.code}"`,
+    `"${r.model}"`,
+    `"${r.timestamp}"`,
+    `"${r.status}"`
   ]);
 
   const csvContent = [
@@ -32,7 +36,7 @@ export const exportToCSV = (records: ScanRecord[]) => {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.setAttribute('href', url);
-  link.setAttribute('download', `scan_report_${new Date().toISOString().split('T')[0]}.csv`);
+  link.setAttribute('download', `scan_report_${new Date().toISOString().split('T')[0]}_${Date.now()}.csv`);
   link.style.visibility = 'hidden';
   document.body.appendChild(link);
   link.click();
