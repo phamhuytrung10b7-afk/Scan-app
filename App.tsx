@@ -3,10 +3,10 @@ import { Download, ScanLine, Users, CheckCircle, AlertOctagon, RefreshCw, Box, S
 import { format } from 'date-fns';
 
 import { ScanRecord, Stats, ErrorState, DEFAULT_PROCESS_STAGES, Stage } from './types';
-import { Button } from './components/Button';
-import { ErrorModal } from './components/ErrorModal';
-import { StatCard } from './components/StatCard';
-import { StageSettingsModal } from './components/StageSettingsModal';
+import { Button } from './Button';
+import { ErrorModal } from './ErrorModal';
+import { StatCard } from './StatCard';
+import { StageSettingsModal } from './StageSettingsModal';
 
 export default function App() {
   // --- STATE ---
