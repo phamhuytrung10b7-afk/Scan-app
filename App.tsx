@@ -465,22 +465,59 @@ export default function App() {
   };
 
   const exportCSV = useCallback(() => {
-    // Determine headers based on CURRENT STAGE configuration
-    const customHeaders = Array.from({length: 8}, (_, i) => {
-      const label = currentStageObj?.additionalFieldLabels?.[i];
-      // Use configured label if exists, otherwise fallback to "Thông số X"
-      return (label && label.trim() !== "") ? label : `Thông số ${i+1}`;
+    // 1. Calculate Dynamic Headers based on ALL stages configuration
+    // We create a definition map to know which column pulls from which data index
+    const dynamicColsDef: { header: string, stageId: number, valueIndex: number }[] = [];
+
+    stages.forEach(stage => {
+        // Only consider stages that have at least one label configured
+        if (stage.additionalFieldLabels?.some(l => l && l.trim())) {
+             stage.additionalFieldLabels.forEach((label, idx) => {
+                 if (label && label.trim()) {
+                     // Create a header like "S1: Voltage" or "Stage 1 - Voltage"
+                     // Using specific stage name prefix to avoid ambiguity
+                     dynamicColsDef.push({
+                         header: `${stage.name} - ${label}`,
+                         stageId: stage.id,
+                         valueIndex: idx
+                     });
+                 }
+             });
+        }
     });
 
-    const headers = ["STT", "Mã IMEI máy", "Tên Model", "Mã Kiểm Tra (IMEI)", "Công Đoạn", "Kết quả chính", ...customHeaders, "Nhân Viên", "Thời Gian", "Trạng Thái", "Ghi Chú"];
+    // 2. Prepare full Header row
+    const headers = [
+        "STT", 
+        "Mã IMEI máy", 
+        "Tên Model", 
+        "Mã Kiểm Tra (IMEI)", 
+        "Công Đoạn", 
+        "Kết quả chính", 
+        ...dynamicColsDef.map(d => d.header), // The expanded dynamic columns
+        "Nhân Viên", 
+        "Thời Gian", 
+        "Trạng Thái", 
+        "Ghi Chú"
+    ];
     
+    // 3. Map Data Rows
     const rows = history.map(item => {
-      const stageName = stages.find(s => s.id === item.stage)?.name || `Công đoạn ${item.stage}`;
+      const stageObj = stages.find(s => s.id === item.stage);
+      const stageName = stageObj?.name || `Công đoạn ${item.stage}`;
+      
       let statusText = 'LỖI';
       if (item.status === 'valid') statusText = 'OK';
       if (item.status === 'defect') statusText = 'NG (Hàng Lỗi)';
       
-      const extraVals = item.additionalValues || Array(8).fill("");
+      // Map the dynamic columns
+      const dynamicCells = dynamicColsDef.map(def => {
+          // Only fill data if the record belongs to the column's stage
+          if (item.stage === def.stageId) {
+              return item.additionalValues?.[def.valueIndex] || "-";
+          }
+          return ""; // Empty cell for irrelevant stages
+      });
 
       return [
         item.stt,
@@ -489,7 +526,7 @@ export default function App() {
         item.model,
         stageName,
         item.measurement || '-',
-        ...extraVals.map(v => v || '-'),
+        ...dynamicCells,
         item.employeeId,
         format(new Date(item.timestamp), 'yyyy-MM-dd HH:mm:ss'),
         statusText,
@@ -504,7 +541,7 @@ export default function App() {
     link.setAttribute("href", url);
     link.setAttribute("download", `scan_process_data_${format(new Date(), 'yyyyMMdd_HHmmss')}.csv`);
     link.click();
-  }, [history, stages, currentStageObj]);
+  }, [history, stages]);
 
   const resetSession = () => {
     if (confirm("CẢNH BÁO: Hành động này sẽ xóa toàn bộ lịch sử và tiến độ sản xuất hiện tại. Bạn có chắc không?")) {
