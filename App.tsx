@@ -1,732 +1,962 @@
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { Download, ScanLine, Users, CheckCircle, AlertOctagon, RefreshCw, Box, Settings, AlertTriangle, Layers, Edit, XCircle, Activity, List, Tag, Upload, Maximize, Minimize } from 'lucide-react';
+import { format } from 'date-fns';
+import { read, utils } from 'xlsx';
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { 
-  Barcode, 
-  Trash2, 
-  Download, 
-  CheckCircle2, 
-  AlertTriangle, 
-  Maximize2, 
-  Settings,
-  History,
-  Tag,
-  AlertOctagon, 
-  X, 
-  FileWarning, 
-  FlaskConical, 
-  ClipboardList,
-  Save,
-  PenLine,
-  LayoutGrid,
-  XCircle
-} from 'lucide-react';
-import { ScanRecord, ScanStatus, TestConfig } from './types';
+import { ScanRecord, Stats, ErrorState, DEFAULT_PROCESS_STAGES, Stage } from './types';
+import { Button } from './Button';
+import { ErrorModal } from './ErrorModal';
+import { StatCard } from './StatCard';
+import { StageSettingsModal } from './StageSettingsModal';
 
-// Utility for formatting dates
-const formatTimestamp = (date: Date): string => {
-  const pad = (num: number) => num.toString().padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
-         `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
-};
-
-const App: React.FC = () => {
-  const [scans, setScans] = useState<ScanRecord[]>([]);
-  const [inputValue, setInputValue] = useState('');
-  const [modelName, setModelName] = useState('');
-  const [errorCode, setErrorCode] = useState(''); 
+export default function App() {
+  // --- STATE ---
   
-  // Advanced Test Config State
-  const [showConfigModal, setShowConfigModal] = useState(false);
-  const [testConfig, setTestConfig] = useState<TestConfig>({
-    enabled: false,
-    stepName: '',
-    mainResult: { name: 'Kết quả Test', standardValue: 'PASS' },
-    parameters: Array.from({ length: 15 }, (_, i) => ({ id: i, name: '', defaultValue: '' }))
+  // Configuration
+  const [stageEmployees, setStageEmployees] = useState<Record<number, string>>({});
+  const [currentModel, setCurrentModel] = useState<string>(''); // Used for IMEI Validation (Space separated list)
+  const [modelName, setModelName] = useState<string>(''); // New: Actual Model Name
+  
+  // Dynamic Stages with LocalStorage Persistence
+  const [stages, setStages] = useState<Stage[]>(() => {
+    try {
+      const saved = localStorage.getItem('proscan_stages');
+      if (saved) {
+        // Migration support for old data
+        const parsed = JSON.parse(saved);
+        return parsed.map((s: any) => ({
+          ...s,
+          // Update default array size from potential old/new sizes to 8
+          additionalFieldLabels: s.additionalFieldLabels ? [...s.additionalFieldLabels, ...Array(8).fill("")].slice(0, 8) : Array(8).fill(""),
+          additionalFieldDefaults: s.additionalFieldDefaults ? [...s.additionalFieldDefaults, ...Array(8).fill("")].slice(0, 8) : Array(8).fill("")
+        }));
+      }
+    } catch (e) {
+      console.error("Failed to load stages from storage", e);
+    }
+    return DEFAULT_PROCESS_STAGES;
   });
 
-  // Temp Config State for Inline Modal
-  const [tempConfig, setTempConfig] = useState<TestConfig>({
-    enabled: false,
-    stepName: '',
-    mainResult: { name: 'Kết quả Test', standardValue: 'PASS' },
-    parameters: Array.from({ length: 15 }, (_, i) => ({ id: i, name: '', defaultValue: '' }))
+  // Ensure currentStage is valid initially (fallback to first available stage)
+  const [currentStage, setCurrentStage] = useState<number>(() => {
+    return stages.length > 0 ? stages[0].id : 1;
   });
 
-  // Runtime Input States for Test Mode
-  const [testResultInput, setTestResultInput] = useState('');
-  const [testParamInputs, setTestParamInputs] = useState<string[]>(Array(15).fill(''));
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
-  const [lastScan, setLastScan] = useState<ScanRecord | null>(null);
-  const [showDuplicateWarning, setShowDuplicateWarning] = useState(false);
-  const [showMissingModelWarning, setShowMissingModelWarning] = useState(false);
-  const [showMissingDataWarning, setShowMissingDataWarning] = useState(false); 
+  // Data
+  const [history, setHistory] = useState<ScanRecord[]>([]);
+  const [productProgress, setProductProgress] = useState<Record<string, number>>({});
+  const [productStatus, setProductStatus] = useState<Record<string, 'valid' | 'defect'>>({});
   
-  const inputRef = useRef<HTMLInputElement>(null);
+  // UI State
+  const [stats, setStats] = useState<Stats>({ success: 0, defect: 0, error: 0 });
+  
+  // Inputs
+  const [employeeInput, setEmployeeInput] = useState('');
+  const [defectCode, setDefectCode] = useState(''); 
+  const [measurementValue, setMeasurementValue] = useState(''); 
+  const [productInput, setProductInput] = useState('');
+  
+  // New: State for 8 additional fields
+  const [additionalValues, setAdditionalValues] = useState<string[]>(Array(8).fill(""));
+  
+  const [errorModal, setErrorModal] = useState<ErrorState>({ isOpen: false, message: '' });
+
+  // Refs
+  const employeeInputRef = useRef<HTMLInputElement>(null);
+  const defectInputRef = useRef<HTMLInputElement>(null);
+  const measurementInputRef = useRef<HTMLInputElement>(null);
+  const productInputRef = useRef<HTMLInputElement>(null);
   const modelInputRef = useRef<HTMLInputElement>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
+  const modelNameRef = useRef<HTMLInputElement>(null); // New Ref for Model Name
+  // Refs for 8 additional inputs
+  const extraInputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
-  // Apply default values when config changes or enabled
+  // --- EFFECT: Save Stages to LocalStorage ---
   useEffect(() => {
-    if (testConfig.enabled) {
-      setTestResultInput(testConfig.mainResult.standardValue || '');
-      setTestParamInputs(testConfig.parameters.map(p => p.defaultValue));
-    }
-  }, [testConfig]);
+    localStorage.setItem('proscan_stages', JSON.stringify(stages));
+  }, [stages]);
 
-  const playSound = (type: 'success' | 'error') => {
-    if (!audioContextRef.current) {
-      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-    }
-    const ctx = audioContextRef.current;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
+  // --- EFFECT: Calculate Stats for Current Stage ---
+  useEffect(() => {
+    const currentStageSuccess = history.filter(
+      r => r.status === 'valid' && r.stage === currentStage
+    ).length;
 
-    osc.connect(gain);
-    gain.connect(ctx.destination);
+    const currentStageDefect = history.filter(
+      r => r.status === 'defect' && r.stage === currentStage
+    ).length;
+    
+    setStats(prev => ({ 
+      ...prev, 
+      success: currentStageSuccess,
+      defect: currentStageDefect
+    }));
+  }, [history, currentStage]);
 
-    if (type === 'success') {
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(880, ctx.currentTime);
-      gain.gain.setValueAtTime(0.1, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.1);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.1);
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+  }, []);
+
+  // --- HELPER: Get Current Stage Object & Employee ---
+  const currentStageObj = useMemo(() => stages.find(s => s.id === currentStage), [stages, currentStage]);
+  const currentEmployeeId = stageEmployees[currentStage];
+  
+  // Determine active extra fields (those with labels)
+  const activeExtraFields = useMemo(() => {
+    if (!currentStageObj?.additionalFieldLabels) return [];
+    return currentStageObj.additionalFieldLabels.map((label, idx) => ({ label, idx })).filter(f => f.label.trim() !== "");
+  }, [currentStageObj]);
+
+  // Helper to load defaults for current stage
+  const loadDefaults = useCallback(() => {
+    if (currentStageObj?.additionalFieldDefaults) {
+      // Create a copy of defaults, ensuring empty strings for missing values
+      const defaults = [...currentStageObj.additionalFieldDefaults];
+      while(defaults.length < 8) defaults.push("");
+      setAdditionalValues(defaults);
     } else {
-      osc.type = 'square';
-      osc.frequency.setValueAtTime(220, ctx.currentTime);
-      gain.gain.setValueAtTime(0.1, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.3);
+      setAdditionalValues(Array(8).fill(""));
+    }
+  }, [currentStageObj]);
+
+  // Apply defaults when stage changes
+  useEffect(() => {
+    loadDefaults();
+  }, [currentStage, loadDefaults]);
+
+  // --- INITIAL FOCUS ---
+  useEffect(() => {
+    if (!modelName) modelNameRef.current?.focus();
+    else if (!currentModel) modelInputRef.current?.focus();
+    else if (!currentEmployeeId) employeeInputRef.current?.focus();
+    else {
+      // Logic for initial focus based on stage config
+      if (currentStageObj?.enableMeasurement) measurementInputRef.current?.focus();
+      else productInputRef.current?.focus();
+    }
+  }, [currentStage]);
+
+  // --- HANDLERS ---
+  
+  const toggleFullScreen = () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(err => {
+        console.error(`Error attempting to enable full-screen mode: ${err.message}`);
+      });
+    } else {
+      if (document.exitFullscreen) {
+        document.exitFullscreen();
+      }
     }
   };
 
-  useEffect(() => {
-    const keepFocus = () => {
-      const activeId = document.activeElement?.id;
-      // Allow focus on configuration modal inputs
-      if (showConfigModal) return;
-      
-      // Allow focus on runtime inputs
-      if (activeId === 'model-input' || activeId === 'error-input' || activeId === 'main-result-input' || activeId?.startsWith('param-input-')) return;
-      
-      if (showMissingModelWarning || showMissingDataWarning) return;
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
 
-      if (document.activeElement?.tagName !== 'INPUT' && document.activeElement?.tagName !== 'BUTTON') {
-        inputRef.current?.focus();
+    try {
+      const data = await file.arrayBuffer();
+      const workbook = read(data);
+      const firstSheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[firstSheetName];
+      
+      // Get data as array of arrays to be safe about column structure
+      // Type 'any' used because sheet_to_json returns generic objects
+      const jsonData = utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
+      
+      // Extract 1st column, filter empties, join by space
+      const codes = jsonData
+          .map(row => row[0]) // Take first cell of each row
+          .filter(cell => cell !== undefined && cell !== null && String(cell).trim() !== '')
+          .map(cell => String(cell).trim().toUpperCase());
+
+      if (codes.length === 0) {
+        alert("File không có dữ liệu ở cột A!");
+        return;
       }
-    };
-    document.addEventListener('mousedown', keepFocus);
-    const interval = setInterval(keepFocus, 1000);
-    return () => {
-      document.removeEventListener('mousedown', keepFocus);
-      clearInterval(interval);
-    };
-  }, [showMissingModelWarning, showConfigModal, showMissingDataWarning]);
 
-  const handleScan = useCallback((code: string) => {
-    const trimmedCode = code.trim();
-    if (!trimmedCode) return;
-
-    let scanStatus = ScanStatus.VALID;
-    let systemErrorCode = errorCode.trim();
-    let effectiveModelName = modelName.trim();
-
-    // 1. Check Model Name
-    if (!effectiveModelName) {
-      scanStatus = ScanStatus.ERROR;
-      systemErrorCode = systemErrorCode || 'THIẾU TÊN MODEL';
-      effectiveModelName = '---';
+      const resultString = codes.join(' ');
+      setCurrentModel(resultString);
+      alert(`Đã tải thành công ${codes.length} mã kiểm tra!`);
       
-      playSound('error');
-      setShowMissingModelWarning(true);
-      setTimeout(() => {
-        setShowMissingModelWarning(false);
-        modelInputRef.current?.focus();
-      }, 2000);
+      // Reset file input
+      e.target.value = '';
+    } catch (err) {
+      console.error(err);
+      alert("Lỗi đọc file Excel. Vui lòng kiểm tra lại định dạng.");
     }
+  };
 
-    // 2. Check Test Data Constraints
-    if (scanStatus !== ScanStatus.ERROR && testConfig.enabled) {
-      // Check Main Result
-      const isMainResultMissing = !testResultInput.trim();
-      
-      // Check active parameters
-      const isParamsMissing = testConfig.parameters.some((p, i) => {
-         return p.name.trim() !== '' && !testParamInputs[i].trim();
-      });
-
-      if (isMainResultMissing || isParamsMissing) {
-        scanStatus = ScanStatus.ERROR;
-        systemErrorCode = systemErrorCode || 'THIẾU DỮ LIỆU TEST';
-
-        playSound('error');
-        setShowMissingDataWarning(true);
-        setTimeout(() => setShowMissingDataWarning(false), 2500);
+  const handleEmployeeScan = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      const val = employeeInput.trim();
+      if (val) {
+        setStageEmployees(prev => ({ ...prev, [currentStage]: val }));
+        setEmployeeInput('');
+        
+        // Smart Focus Next
+        setTimeout(() => {
+             if (currentStageObj?.enableMeasurement) measurementInputRef.current?.focus();
+             else productInputRef.current?.focus();
+        }, 50);
       }
     }
+  };
 
-    // 3. Check Duplicate
-    if (scanStatus === ScanStatus.VALID) {
-      const isDuplicate = scans.some(s => s.code === trimmedCode && s.status === ScanStatus.VALID);
-      if (isDuplicate) {
-        scanStatus = ScanStatus.DUPLICATE;
-        playSound('error');
-        setShowDuplicateWarning(true);
-        setTimeout(() => setShowDuplicateWarning(false), 2000);
+  const handleDefectScan = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') productInputRef.current?.focus();
+  };
+
+  const handleMeasurementScan = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      if (measurementValue.trim()) {
+        // Logic: Find the first ACTIVE field that DOES NOT have a value (skips defaults)
+        const nextField = activeExtraFields.find(f => !additionalValues[f.idx]);
+        
+        if (nextField) {
+           extraInputRefs.current[nextField.idx]?.focus();
+        } else if (activeExtraFields.length > 0) {
+           const hasManualFields = activeExtraFields.some(f => !currentStageObj?.additionalFieldDefaults?.[f.idx]);
+           if (!hasManualFields) {
+             productInputRef.current?.focus();
+           } else {
+             productInputRef.current?.focus();
+           }
+        } else {
+           productInputRef.current?.focus();
+        }
+      }
+    }
+  };
+
+  const handleExtraInputScan = (e: React.KeyboardEvent<HTMLInputElement>, index: number) => {
+    if (e.key === 'Enter') {
+      // Find the next field in the ACTIVE list
+      const currentActivePos = activeExtraFields.findIndex(f => f.idx === index);
+      
+      if (currentActivePos !== -1 && currentActivePos < activeExtraFields.length - 1) {
+         let nextActivePos = currentActivePos + 1;
+         let nextRealIdx = activeExtraFields[nextActivePos].idx;
+
+         // Try to find the next empty field
+         while (nextActivePos < activeExtraFields.length && additionalValues[activeExtraFields[nextActivePos].idx]) {
+            const isDefaulted = !!currentStageObj?.additionalFieldDefaults?.[activeExtraFields[nextActivePos].idx];
+            if (!isDefaulted) break; // Found a manual field
+            nextActivePos++;
+         }
+
+         if (nextActivePos < activeExtraFields.length) {
+            nextRealIdx = activeExtraFields[nextActivePos].idx;
+            extraInputRefs.current[nextRealIdx]?.focus();
+         } else {
+            productInputRef.current?.focus();
+         }
+
       } else {
-        playSound('success');
+         // End of list
+         productInputRef.current?.focus();
       }
     }
+  };
 
-    const timestamp = formatTimestamp(new Date());
+  const updateAdditionalValue = (index: number, value: string) => {
+    const newValues = [...additionalValues];
+    newValues[index] = value;
+    setAdditionalValues(newValues);
+  };
+
+  const handleError = (message: string, scannedCode: string = '') => {
+    setStats(prev => ({ ...prev, error: prev.error + 1 }));
     
+    const errorRecord: ScanRecord = {
+      id: crypto.randomUUID(),
+      stt: history.length + 1,
+      productCode: scannedCode || '---',
+      model: currentModel || 'CHƯA CÓ',
+      modelName: modelName || '',
+      employeeId: currentEmployeeId || 'CHƯA CÓ',
+      timestamp: new Date().toISOString(),
+      status: 'error',
+      note: message,
+      stage: currentStage
+    };
+    setHistory(prev => [errorRecord, ...prev]);
+    setErrorModal({ isOpen: true, message });
+  };
+
+  const handleSuccess = (code: string) => {
+    setProductProgress(prev => ({ ...prev, [code]: currentStage }));
+    setProductStatus(prev => ({ ...prev, [code]: 'valid' }));
+
     const newRecord: ScanRecord = {
       id: crypto.randomUUID(),
-      code: trimmedCode,
-      modelName: effectiveModelName,
-      errorCode: systemErrorCode, 
-      stepName: testConfig.enabled ? testConfig.stepName : undefined,
-      testResult: testConfig.enabled ? testResultInput : undefined,
-      testParams: testConfig.enabled ? [...testParamInputs] : undefined,
-      timestamp,
-      status: scanStatus,
-      index: scans.length + 1
+      stt: history.length + 1,
+      productCode: code,
+      model: currentModel,
+      modelName: modelName,
+      employeeId: currentEmployeeId || 'UNKNOWN',
+      timestamp: new Date().toISOString(),
+      status: 'valid',
+      note: 'Thành công',
+      stage: currentStage,
+      measurement: currentStageObj?.enableMeasurement ? measurementValue : undefined,
+      additionalValues: currentStageObj?.enableMeasurement ? [...additionalValues] : undefined
     };
 
-    setScans(prev => [newRecord, ...prev]);
-    setLastScan(newRecord);
-    setInputValue('');
+    setHistory(prev => [newRecord, ...prev]);
+    
+    // Reset Inputs
+    setProductInput('');
+    setDefectCode('');
+    setMeasurementValue(''); 
+    
+    // RESET TO DEFAULTS
+    loadDefaults();
+    
+    // Return Focus logic
+    setTimeout(() => {
+        if (currentStageObj?.enableMeasurement) measurementInputRef.current?.focus();
+        else productInputRef.current?.focus();
+    }, 50);
+  };
 
-    if (scanStatus === ScanStatus.VALID) {
-      setErrorCode(''); 
-      if (testConfig.enabled) {
-        setTestResultInput(testConfig.mainResult.standardValue || '');
-        setTestParamInputs(testConfig.parameters.map(p => p.defaultValue));
-      }
-    }
+  const handleDefectRecord = (code: string, reason: string) => {
+    setProductStatus(prev => ({ ...prev, [code]: 'defect' }));
 
-  }, [scans, modelName, errorCode, testConfig, testResultInput, testParamInputs]);
+    const newRecord: ScanRecord = {
+      id: crypto.randomUUID(),
+      stt: history.length + 1,
+      productCode: code,
+      model: currentModel,
+      modelName: modelName,
+      employeeId: currentEmployeeId || 'UNKNOWN',
+      timestamp: new Date().toISOString(),
+      status: 'defect',
+      note: `Lỗi: ${reason}`,
+      stage: currentStage,
+      measurement: currentStageObj?.enableMeasurement ? measurementValue : undefined,
+      additionalValues: currentStageObj?.enableMeasurement ? [...additionalValues] : undefined
+    };
 
-  const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    setHistory(prev => [newRecord, ...prev]);
+    
+    setProductInput('');
+    setDefectCode(''); 
+    setMeasurementValue('');
+    loadDefaults();
+
+    setTimeout(() => {
+        if (currentStageObj?.enableMeasurement) measurementInputRef.current?.focus();
+        else productInputRef.current?.focus();
+    }, 50);
+  };
+
+  const handleProductScan = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
-      handleScan(inputValue);
-    }
-  };
+      e.preventDefault();
+      const code = productInput.trim();
+      if (!code) return;
 
-  const clearAll = () => {
-    if (window.confirm('Bạn có chắc chắn muốn xóa toàn bộ lịch sử quét?')) {
-      setScans([]);
-      setLastScan(null);
-    }
-  };
+      // VALIDATIONS
+      // 0. Model Name Check (MANDATORY)
+      if (!modelName.trim()) return handleError("Lỗi: Chưa nhập Tên Model.", code);
 
-  const exportCSV = () => {
-    if (scans.length === 0) return;
-    
-    const baseHeaders = ['STT', 'Tên Model', 'Mã Đã Quét', 'Mã Lỗi (NG)', 'Tên Công Đoạn', 'Kết Quả Chính'];
-    const paramHeaders = testConfig.enabled 
-        ? testConfig.parameters.filter(p => p.name).map(p => p.name)
-        : Array.from({length: 15}, (_, i) => `TS${i+1}`);
-    
-    const headers = [...baseHeaders, ...paramHeaders, 'Thời Gian Quét', 'Trạng Thái'];
-
-    const rows = scans.map(s => {
-      const baseData = [
-        s.index, 
-        s.modelName, 
-        s.code,
-        s.errorCode || '',
-        s.stepName || '',
-        s.testResult || ''
-      ];
+      // 1. Check if Validation List is Configured
+      if (!currentModel.trim()) return handleError("Lỗi: Chưa cài đặt Danh sách Mã chuẩn (Validation List).", code);
       
-      let pData: string[] = [];
-      if (testConfig.enabled) {
-         const activeIndices = testConfig.parameters.map((p, i) => p.name ? i : -1).filter(i => i !== -1);
-         pData = activeIndices.map(idx => s.testParams?.[idx] || '');
-      } else {
-         pData = s.testParams || Array(15).fill('');
+      // 2. Parse Valid Patterns (Split by whitespace)
+      // REGEX: /\s+/ matches one or more whitespace characters
+      const validPatterns = currentModel.trim().split(/\s+/).map(s => s.trim().toUpperCase()).filter(s => s.length > 0);
+      
+      // 3. Employee Check
+      if (!currentEmployeeId) return handleError(`Lỗi: Chưa xác định nhân viên cho công đoạn ${currentStage}.`, code);
+      
+      // 4. Validate Code against Patterns (Contains ANY)
+      const isMatch = validPatterns.some(pattern => code.toUpperCase().includes(pattern));
+      if (!isMatch) {
+         // Simplified Error Message as requested
+         return handleError(`Lỗi: Mã không nằm trong kế hoạch sản xuất.\nMã quét: ${code}`, code);
       }
 
-      let statusText = 'HỢP LỆ';
-      if (s.status === ScanStatus.DUPLICATE) statusText = 'TRÙNG LẶP';
-      if (s.status === ScanStatus.ERROR) statusText = 'LỖI';
+      if (defectCode.trim()) {
+        handleDefectRecord(code, defectCode);
+        return;
+      }
 
-      return [...baseData, ...pData, s.timestamp, statusText];
-    });
+      // MEASUREMENT VALIDATION
+      if (currentStageObj?.enableMeasurement) {
+        const val = measurementValue.trim();
+        if (!val) {
+           measurementInputRef.current?.focus();
+           return handleError(`Lỗi: Công đoạn này yêu cầu nhập ${currentStageObj.measurementLabel || 'giá trị đo'}.`, code);
+        }
+
+        // CHECK AGAINST STANDARD
+        const standard = currentStageObj.measurementStandard?.trim();
+        if (standard) {
+          const stdNum = parseFloat(standard.replace(',', '.'));
+          const valNum = parseFloat(val.replace(',', '.'));
+
+          if (!isNaN(stdNum)) {
+             if (isNaN(valNum)) {
+                return handleError(`Lỗi: Tiêu chuẩn là số (${standard}), vui lòng nhập kết quả là số.`, code);
+             }
+             if (valNum >= stdNum) {
+                return handleError(`LỖI NG: Kết quả đo quá cao!\nTiêu chuẩn (Max): < ${standard}\nThực tế: ${val}`, code);
+             }
+          } else {
+             if (val.toUpperCase() !== standard.toUpperCase()) {
+                return handleError(`LỖI NG: Kết quả đo không đạt chuẩn!\nTiêu chuẩn: ${standard}\nThực tế: ${val}`, code);
+             }
+          }
+        }
+        
+        // Validate Additional Fields
+        for (const field of activeExtraFields) {
+           if (!additionalValues[field.idx].trim()) {
+             extraInputRefs.current[field.idx]?.focus();
+             return handleError(`Lỗi: Chưa nhập giá trị cho "${field.label}".`, code);
+           }
+        }
+      }
+
+      // LOGIC CHECKS
+      const currentProgress = productProgress[code] || 0;
+      const lastStatus = productStatus[code];
+
+      if (lastStatus === 'defect') {
+        if (currentStage > currentProgress + 1) {
+           return handleError("⛔ CẢNH BÁO: Sản phẩm bị LỖI (NG) chưa được xử lý.", code);
+        }
+      }
+      if (currentProgress >= currentStage) {
+        return handleError(`Lỗi: Mã đã PASS công đoạn ${currentStage} trước đó.`, code);
+      }
+      if (currentStage > 1 && currentProgress < currentStage - 1) {
+        return handleError(`Lỗi: Sai trình tự. Chưa hoàn thành công đoạn ${currentStage - 1}.`, code);
+      }
+
+      handleSuccess(code);
+    }
+  };
+
+  const handleCloseError = () => {
+    setErrorModal({ isOpen: false, message: '' });
+    setProductInput('');
     
-    const csvContent = "\uFEFF" + [headers, ...rows].map(e => e.join(",")).join("\n");
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    setTimeout(() => {
+      // Smart Focus recovery
+      if (!modelName.trim()) modelNameRef.current?.focus();
+      else if (!currentModel.trim()) modelInputRef.current?.focus();
+      else if (!currentEmployeeId) employeeInputRef.current?.focus();
+      else if (currentStageObj?.enableMeasurement) {
+         if (!measurementValue) measurementInputRef.current?.focus();
+         else productInputRef.current?.focus(); // Simplified
+      }
+      else productInputRef.current?.focus();
+    }, 50);
+  };
+
+  const exportCSV = useCallback(() => {
+    // 1. Calculate Dynamic Headers based on ALL stages configuration
+    // We create a definition map to know which column pulls from which data index
+    const dynamicColsDef: { header: string, stageId: number, valueIndex: number }[] = [];
+
+    stages.forEach(stage => {
+        // Only consider stages that have at least one label configured
+        if (stage.additionalFieldLabels?.some(l => l && l.trim())) {
+             stage.additionalFieldLabels.forEach((label, idx) => {
+                 if (label && label.trim()) {
+                     // Create a header like "S1: Voltage" or "Stage 1 - Voltage"
+                     // Using specific stage name prefix to avoid ambiguity
+                     dynamicColsDef.push({
+                         header: `${stage.name} - ${label}`,
+                         stageId: stage.id,
+                         valueIndex: idx
+                     });
+                 }
+             });
+        }
+    });
+
+    // 2. Prepare full Header row
+    const headers = [
+        "STT", 
+        "Mã IMEI máy", 
+        "Tên Model", 
+        "Mã Kiểm Tra (IMEI)", 
+        "Công Đoạn", 
+        "Kết quả chính", 
+        ...dynamicColsDef.map(d => d.header), // The expanded dynamic columns
+        "Nhân Viên", 
+        "Thời Gian", 
+        "Trạng Thái", 
+        "Ghi Chú"
+    ];
+    
+    // 3. Map Data Rows
+    const rows = history.map(item => {
+      const stageObj = stages.find(s => s.id === item.stage);
+      const stageName = stageObj?.name || `Công đoạn ${item.stage}`;
+      
+      let statusText = 'LỖI';
+      if (item.status === 'valid') statusText = 'OK';
+      if (item.status === 'defect') statusText = 'NG (Hàng Lỗi)';
+      
+      // Map the dynamic columns
+      const dynamicCells = dynamicColsDef.map(def => {
+          // Only fill data if the record belongs to the column's stage
+          if (item.stage === def.stageId) {
+              return item.additionalValues?.[def.valueIndex] || "-";
+          }
+          return ""; // Empty cell for irrelevant stages
+      });
+
+      return [
+        item.stt,
+        item.productCode,
+        item.modelName || '',
+        item.model,
+        stageName,
+        item.measurement || '-',
+        ...dynamicCells,
+        item.employeeId,
+        format(new Date(item.timestamp), 'yyyy-MM-dd HH:mm:ss'),
+        statusText,
+        item.note || ''
+      ];
+    });
+
+    const csvContent = [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+    const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     const url = URL.createObjectURL(blob);
     link.setAttribute("href", url);
-    link.setAttribute("download", `du_lieu_quet_${new Date().getTime()}.csv`);
-    document.body.appendChild(link);
+    link.setAttribute("download", `scan_process_data_${format(new Date(), 'yyyyMMdd_HHmmss')}.csv`);
     link.click();
-    document.body.removeChild(link);
+  }, [history, stages]);
+
+  const resetSession = () => {
+    if (confirm("CẢNH BÁO: Hành động này sẽ xóa toàn bộ lịch sử và tiến độ sản xuất hiện tại. Bạn có chắc không?")) {
+      setHistory([]);
+      setProductProgress({});
+      setProductStatus({});
+      setStageEmployees({});
+      setStats({ success: 0, defect: 0, error: 0 });
+      setProductInput('');
+      setDefectCode('');
+      setMeasurementValue('');
+      // Keep model settings? User might want to reset all.
+      // But typically setup params stay.
+      loadDefaults();
+      employeeInputRef.current?.focus();
+    }
   };
 
-  // Helper for updating temp config parameters
-  const handleTempParamChange = (idx: number, field: 'name' | 'defaultValue', value: string) => {
-    const newParams = [...tempConfig.parameters];
-    newParams[idx] = { ...newParams[idx], [field]: value };
-    setTempConfig({ ...tempConfig, parameters: newParams });
+  const handleStageChange = (newStageId: number) => {
+    setCurrentStage(newStageId);
+    setMeasurementValue('');
+    
+    const newStage = stages.find(s => s.id === newStageId);
+    const empForNewStage = stageEmployees[newStageId];
+    
+    setTimeout(() => {
+        if (!empForNewStage) {
+            employeeInputRef.current?.focus();
+        } else if (newStage?.enableMeasurement) {
+            measurementInputRef.current?.focus();
+        } else {
+            productInputRef.current?.focus();
+        }
+    }, 50);
   };
 
   return (
-    <div className="flex flex-col h-screen bg-slate-50 text-slate-900 overflow-hidden">
-      {/* INLINED CONFIG MODAL */}
-      {showConfigModal && (
-         <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl h-[90vh] flex flex-col overflow-hidden border border-slate-200">
-              {/* Header */}
-              <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-                <div className="flex items-center gap-2 text-indigo-700">
-                  <Settings className="w-6 h-6" />
-                  <h2 className="text-lg font-bold uppercase">Cấu hình chế độ Test</h2>
-                </div>
-                <button onClick={() => setShowConfigModal(false)} className="text-slate-400 hover:text-red-500 transition-colors">
-                  <X className="w-8 h-8" />
-                </button>
-              </div>
-
-              {/* Body */}
-              <div className="flex-1 overflow-y-auto p-6 bg-slate-50/50">
-                {/* Step Name & Enable */}
-                <div className="flex flex-col md:flex-row gap-4 mb-6">
-                   <div className="flex-1">
-                     <label className="block text-xs font-bold text-slate-400 uppercase mb-1">3. TÊN CÔNG ĐOẠN</label>
-                     <input 
-                       type="text" 
-                       value={tempConfig.stepName}
-                       onChange={e => setTempConfig({...tempConfig, stepName: e.target.value})}
-                       className="w-full text-lg font-semibold border border-slate-300 rounded-lg px-4 py-3 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-                       placeholder="VD: CĐ 3 : Test nước"
-                     />
-                   </div>
-                   <div className="flex items-end mb-1">
-                     <label className="flex items-center gap-3 cursor-pointer bg-white px-4 py-3 rounded-lg border border-slate-300 hover:border-indigo-400 transition-all select-none shadow-sm">
-                        <input 
-                          type="checkbox" 
-                          checked={tempConfig.enabled}
-                          onChange={e => setTempConfig({...tempConfig, enabled: e.target.checked})}
-                          className="w-6 h-6 text-indigo-600 rounded focus:ring-indigo-500 border-gray-300"
-                        />
-                        <span className="font-bold text-slate-700 flex items-center gap-2">
-                           <FlaskConical size={20} className={tempConfig.enabled ? "text-indigo-600" : "text-slate-400"}/>
-                           Kích hoạt Test?
-                        </span>
-                     </label>
-                   </div>
-                </div>
-
-                <div className="flex flex-col lg:flex-row gap-6 h-full">
-                   {/* Left: Main Result Config */}
-                   <div className="lg:w-1/3 bg-white p-5 rounded-xl border-2 border-indigo-100 shadow-sm h-fit">
-                      <h3 className="text-indigo-700 font-bold mb-4 flex items-center gap-2">
-                        <span className="bg-indigo-100 px-2 py-0.5 rounded text-xs">1</span>
-                        TÊN KẾT QUẢ CHÍNH (BẮT BUỘC)
-                      </h3>
-                      <div className="space-y-4">
-                        <div>
-                          <input 
-                            type="text" 
-                            value={tempConfig.mainResult.name}
-                            onChange={e => setTempConfig({...tempConfig, mainResult: {...tempConfig.mainResult, name: e.target.value}})}
-                            className="w-full border border-indigo-200 rounded-md px-3 py-2 text-indigo-900 font-medium focus:outline-none focus:border-indigo-500"
-                            placeholder="Kết quả Test"
-                          />
-                        </div>
-                        
-                        <div className="bg-green-50 p-4 rounded-lg border border-green-100">
-                          <h4 className="text-green-700 text-xs font-bold uppercase mb-2 flex items-center gap-1">
-                            <CheckCircle2 size={12}/> Giá trị tiêu chuẩn
-                          </h4>
-                          <input 
-                            type="text" 
-                            value={tempConfig.mainResult.standardValue}
-                            onChange={e => setTempConfig({...tempConfig, mainResult: {...tempConfig.mainResult, standardValue: e.target.value}})}
-                            className="w-full bg-white border border-green-200 rounded-md px-3 py-2 text-green-800 font-bold"
-                            placeholder="PASS"
-                          />
-                          <p className="text-[10px] text-slate-400 mt-2">
-                            * Mặc định sẽ điền giá trị này. Nếu sai khác sẽ cảnh báo (tính năng hiển thị).
-                          </p>
-                        </div>
-                      </div>
-                   </div>
-
-                   {/* Right: Extended Params Config */}
-                   <div className="lg:w-2/3">
-                     <h3 className="text-slate-600 font-bold mb-4 flex items-center gap-2">
-                        <span className="bg-slate-200 px-2 py-0.5 rounded text-xs">2</span>
-                        CẤU HÌNH 15 THÔNG SỐ MỞ RỘNG
-                      </h3>
-                      
-                      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 overflow-y-auto max-h-[500px] pr-2">
-                        {tempConfig.parameters.map((param, idx) => (
-                           <div key={param.id} className="bg-white p-3 rounded-lg border border-slate-200 hover:border-indigo-300 transition-colors shadow-sm">
-                              <div className="flex items-center gap-2 mb-2">
-                                 <span className="text-slate-300 text-xs font-bold bg-slate-50 w-5 h-5 flex items-center justify-center rounded-full">{idx + 1}</span>
-                                 <label className="text-xs font-bold text-slate-500 uppercase">Tên thông số</label>
-                              </div>
-                              <input 
-                                type="text" 
-                                value={param.name}
-                                onChange={e => handleTempParamChange(idx, 'name', e.target.value)}
-                                className="w-full text-sm border-slate-200 rounded-md mb-2 px-2 py-1.5 focus:border-indigo-500"
-                                placeholder="Tắt..."
-                              />
-                              <label className="text-[10px] font-bold text-green-600 uppercase mb-1 block">Mặc định</label>
-                              <input 
-                                type="text" 
-                                value={param.defaultValue}
-                                onChange={e => handleTempParamChange(idx, 'defaultValue', e.target.value)}
-                                className="w-full text-sm bg-green-50/50 border-green-100 text-green-800 rounded-md px-2 py-1.5 focus:border-green-500 placeholder:text-green-200"
-                                placeholder="Auto..."
-                              />
-                           </div>
-                        ))}
-                      </div>
-                   </div>
-                </div>
-              </div>
-
-              {/* Footer */}
-              <div className="px-6 py-4 border-t border-slate-100 bg-white flex justify-end gap-3">
-                <button 
-                  onClick={() => setShowConfigModal(false)}
-                  className="px-6 py-2 rounded-lg font-bold text-slate-500 hover:bg-slate-100 transition-colors"
-                >
-                  Hủy bỏ
-                </button>
-                <button 
-                  onClick={() => {
-                    setTestConfig(tempConfig);
-                    setShowConfigModal(false);
-                  }}
-                  className="px-6 py-2 rounded-lg font-bold bg-indigo-600 text-white hover:bg-indigo-700 shadow-lg shadow-indigo-200 flex items-center gap-2"
-                >
-                  <Save size={18} /> Lưu Cấu Hình
-                </button>
-              </div>
-            </div>
-         </div>
-      )}
-
+    <div className="min-h-screen flex flex-col bg-gray-100">
       {/* Header */}
-      <header className="bg-slate-900 text-white p-4 shadow-lg flex flex-col md:flex-row items-center justify-between z-10 gap-4">
-        <div className="flex items-center space-x-3 w-full md:w-auto">
-          <div className="bg-blue-600 p-2 rounded-lg">
-            <Barcode size={32} />
+      <header className="bg-slate-900 text-white p-4 shadow-lg sticky top-0 z-20">
+        <div className="w-full px-4 flex flex-col md:flex-row items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="bg-blue-600 p-2 rounded-lg shadow-blue-500/50 shadow-lg">
+              <ScanLine size={28} />
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold tracking-tight">ProScan Process Gate</h1>
+              <p className="text-slate-400 text-xs uppercase tracking-wider">Ver 3.6 (8 Params)</p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-xl font-bold tracking-tight">Hệ Thống Quét Mã Pro</h1>
-            <p className="text-xs text-slate-400 font-medium">Kho Vận & Hậu Cần Nhà Máy v1.1</p>
+          
+          <div className="flex flex-col md:flex-row items-center gap-3 w-full md:w-auto">
+             
+             {/* New: Actual Model Name */}
+             <div className="flex items-center bg-slate-800 rounded px-3 py-1 border border-slate-700">
+                 <Tag size={16} className="text-slate-400 mr-2" />
+                 <input
+                    ref={modelNameRef}
+                    type="text"
+                    className="bg-transparent text-white border-none focus:ring-0 text-sm font-bold py-1 w-32 placeholder-slate-500 uppercase"
+                    placeholder="NHẬP TÊN MODEL"
+                    value={modelName}
+                    onChange={(e) => setModelName(e.target.value)}
+                  />
+             </div>
+
+             {/* Existing: Model/IMEI Validation with Upload */}
+             <div className="flex items-center bg-slate-800 rounded px-3 py-1 border border-slate-700">
+                 <Settings size={16} className="text-slate-400 mr-2" />
+                 <div className="flex items-center">
+                    <input
+                        ref={modelInputRef}
+                        type="text"
+                        className="bg-transparent text-white border-none focus:ring-0 text-sm font-bold py-1 w-32 placeholder-slate-500 uppercase"
+                        placeholder="MÃ KIỂM TRA (LIST)"
+                        title="Nhập danh sách mã hợp lệ (cách nhau bởi khoảng trắng) HOẶC upload file Excel"
+                        value={currentModel}
+                        onChange={(e) => setCurrentModel(e.target.value.toUpperCase())}
+                      />
+                      <label className="cursor-pointer hover:bg-slate-600 p-1 rounded transition-colors ml-1" title="Upload Excel (Cột A)">
+                        <Upload size={16} className="text-green-400" />
+                        <input 
+                          type="file" 
+                          className="hidden" 
+                          accept=".xlsx, .xls, .csv" 
+                          onChange={handleFileUpload}
+                        />
+                      </label>
+                 </div>
+             </div>
+             
+             <Button onClick={() => setIsSettingsOpen(true)} className="text-sm bg-slate-700 hover:bg-slate-600 border border-slate-600" title="Cấu hình công đoạn">
+               <Edit size={16} />
+             </Button>
+             
+             <Button onClick={toggleFullScreen} className="text-sm bg-slate-700 hover:bg-slate-600 border border-slate-600" title="Toàn màn hình">
+                {isFullscreen ? <Minimize size={16} /> : <Maximize size={16} />}
+             </Button>
+
+            <Button onClick={exportCSV} variant="success" className="text-sm">
+              <Download size={16} className="mr-1 inline" /> Excel
+            </Button>
+            <Button onClick={resetSession} variant="secondary" className="text-sm">
+              <RefreshCw size={16} className="mr-1 inline" /> Reset
+            </Button>
           </div>
-        </div>
-
-        {/* Model Name Input */}
-        <div className={`flex items-center bg-slate-800 rounded-md px-3 py-1.5 border w-full md:w-auto transition-colors duration-300 ${
-          showMissingModelWarning || (!modelName && scans.length === 0) ? 'border-red-500 animate-pulse bg-red-900/20' : 'border-slate-700'
-        }`}>
-           <Tag size={16} className={`${showMissingModelWarning ? 'text-red-400' : 'text-blue-400'} mr-2`} />
-           <input 
-              ref={modelInputRef}
-              id="model-input"
-              type="text" 
-              className="bg-transparent text-white border-none focus:ring-0 text-sm font-bold w-full md:w-48 placeholder-slate-500 uppercase"
-              placeholder="BẮT BUỘC NHẬP TÊN MODEL..."
-              value={modelName}
-              onChange={(e) => setModelName(e.target.value)}
-           />
-        </div>
-
-        {/* Config Button */}
-        <button 
-          onClick={() => {
-            setTempConfig(testConfig);
-            setShowConfigModal(true);
-          }}
-          className={`flex items-center space-x-2 px-4 py-2 rounded-md border transition-all shadow-sm ${
-            testConfig.enabled 
-              ? 'bg-indigo-600 border-indigo-500 text-white shadow-indigo-500/30' 
-              : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'
-          }`}
-        >
-          <FlaskConical size={18} className={testConfig.enabled ? 'animate-pulse' : ''} />
-          <span className="text-sm font-bold uppercase hidden md:inline">Cấu hình Test</span>
-          {testConfig.enabled && <div className="w-2 h-2 bg-green-400 rounded-full animate-ping ml-1"></div>}
-        </button>
-
-        <div className="flex items-center space-x-4 w-full md:w-auto justify-end">
-          <button onClick={exportCSV} className="flex items-center space-x-2 bg-slate-800 hover:bg-slate-700 text-white px-4 py-2 rounded-md transition-colors border border-slate-700">
-            <Download size={18} />
-            <span className="font-semibold hidden md:inline">Xuất Excel</span>
-          </button>
-          <button onClick={clearAll} className="flex items-center space-x-2 bg-red-900/40 hover:bg-red-800 text-red-200 px-4 py-2 rounded-md transition-colors border border-red-800/50">
-            <Trash2 size={18} />
-            <span className="font-semibold hidden md:inline">Làm Mới</span>
-          </button>
         </div>
       </header>
 
-      {/* Main Content Area */}
-      <main className="flex-1 overflow-hidden flex flex-col md:flex-row p-4 gap-4">
-        
-        {/* Left Column: Input Panel */}
-        <div className="w-full md:w-1/3 flex flex-col gap-4 h-full overflow-y-auto no-scrollbar pb-20">
-          <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 flex flex-col gap-4">
+      {/* STAGE SELECTOR BAR */}
+      <div className="bg-white border-b border-gray-200 shadow-sm sticky top-[72px] z-10">
+        <div className="w-full px-2 p-2 overflow-x-auto">
+           <div className="flex space-x-2 min-w-max">
+             {stages.map((stage) => {
+               const hasEmp = !!stageEmployees[stage.id];
+               return (
+               <button
+                 key={stage.id}
+                 onClick={() => handleStageChange(stage.id)}
+                 className={`flex items-center px-4 py-3 rounded-lg border-2 transition-all duration-200 font-bold text-sm ${
+                   currentStage === stage.id
+                     ? 'bg-blue-600 border-blue-600 text-white shadow-md scale-105'
+                     : 'bg-gray-50 border-gray-200 text-gray-500 hover:bg-gray-100 hover:border-gray-300'
+                 }`}
+               >
+                 <span className={`flex items-center justify-center w-6 h-6 rounded-full mr-2 text-xs border ${
+                    currentStage === stage.id ? 'bg-white text-blue-600 border-white' : hasEmp ? 'bg-green-500 text-white border-green-500' : 'bg-gray-300 text-white border-gray-300'
+                 }`}>
+                   {stage.id}
+                 </span>
+                 {stage.name}
+               </button>
+             )})}
+           </div>
+        </div>
+      </div>
+
+      {/* Main Content */}
+      <main className="flex-1 p-4 md:p-6 w-full grid grid-cols-1 lg:grid-cols-3 gap-6">
+          
+          {/* LEFT: INPUTS & STATS */}
+          <div className="lg:col-span-1 space-y-6">
             
-            {/* Context Labels */}
-            <div className="flex justify-between items-end">
-              <label className="text-sm font-bold text-slate-500 uppercase tracking-wider">Sẵn Sàng Quét</label>
-              <div className="text-right">
-                {modelName ? <div className="text-blue-600 font-bold text-xs uppercase">Model: {modelName}</div> : <div className="text-red-500 font-bold text-xs animate-pulse">CHƯA NHẬP MODEL</div>}
-                {testConfig.enabled && <div className="text-indigo-600 font-bold text-xs uppercase mt-1">{testConfig.stepName}</div>}
-              </div>
-            </div>
-
-            {/* Main Scan Input */}
-            <div className="relative">
-              <input 
-                ref={inputRef}
-                type="text"
-                autoFocus
-                disabled={showMissingModelWarning || showMissingDataWarning}
-                placeholder={modelName ? "Quét mã sản phẩm..." : "Vui lòng nhập tên Model trước"}
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                onKeyDown={onKeyDown}
-                className={`w-full border-2 rounded-xl px-4 py-6 text-3xl font-bold focus:outline-none transition-all mono ${
-                  !modelName 
-                  ? 'bg-slate-200 border-slate-300 text-slate-400 cursor-not-allowed placeholder:text-slate-400' 
-                  : 'bg-slate-100 border-slate-300 focus:border-blue-500 placeholder:text-slate-300'
-                }`}
-              />
-              <div className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400"><Maximize2 size={24} /></div>
-            </div>
-
-            {/* Error Code Input */}
-            <div className={`flex items-center border-2 rounded-lg px-3 py-2 transition-colors ${errorCode ? 'bg-red-50 border-red-400' : 'bg-slate-50 border-slate-200'}`}>
-              <AlertOctagon size={20} className={`mr-2 ${errorCode ? 'text-red-500' : 'text-slate-400'}`} />
-              <input 
-                id="error-input"
-                type="text"
-                placeholder="Quét mã lỗi (Nếu có)..."
-                value={errorCode}
-                onChange={(e) => setErrorCode(e.target.value)}
-                className={`w-full bg-transparent border-none focus:ring-0 text-sm font-bold ${errorCode ? 'text-red-700' : 'text-slate-700'}`}
-              />
-              {errorCode && <button onClick={() => setErrorCode('')} className="text-red-400 hover:text-red-600"><X size={16} /></button>}
-            </div>
-
-            {/* Dynamic Test Inputs */}
-            {testConfig.enabled && (
-              <div className="mt-2 pt-4 border-t border-slate-100 animate-in slide-in-from-top-2">
-                <div className="flex items-center text-indigo-700 mb-3 space-x-2 bg-indigo-50 px-2 py-1 rounded w-fit">
-                   <LayoutGrid size={16} />
-                   <span className="text-xs font-bold uppercase">Thông số mở rộng</span>
-                </div>
-                
-                {/* Main Result Input */}
-                <div className="mb-4">
-                  <label className="text-[10px] font-bold text-indigo-500 uppercase mb-1 block ml-1">{testConfig.mainResult.name}</label>
-                  <input 
-                    id="main-result-input"
-                    type="text"
-                    value={testResultInput}
-                    onChange={e => setTestResultInput(e.target.value)}
-                    className={`w-full border rounded px-3 py-2 font-bold text-indigo-900 focus:ring-2 focus:ring-indigo-400 outline-none ${!testResultInput.trim() && showMissingDataWarning ? 'border-red-400 bg-red-50' : 'border-indigo-200'}`}
-                  />
-                </div>
-
-                {/* Extended Params Grid */}
-                <div className="grid grid-cols-2 gap-3">
-                  {testConfig.parameters.map((param, idx) => {
-                    if (!param.name) return null; // Skip empty params
-                    const isEmpty = !testParamInputs[idx].trim();
-                    return (
-                      <div key={param.id}>
-                        <label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block ml-1 truncate" title={param.name}>
-                          {param.name}
-                        </label>
-                        <input
-                          id={`param-input-${idx}`}
-                          type="text"
-                          value={testParamInputs[idx]}
-                          onChange={(e) => {
-                            const newInputs = [...testParamInputs];
-                            newInputs[idx] = e.target.value;
-                            setTestParamInputs(newInputs);
-                          }}
-                          className={`w-full text-xs border rounded px-2 py-2 focus:ring-1 outline-none font-mono ${isEmpty && showMissingDataWarning ? 'border-red-400 bg-red-50 focus:border-red-500 focus:ring-red-200' : 'bg-slate-50 border-slate-200 focus:border-indigo-500 focus:ring-indigo-500'}`}
-                        />
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-            
-            <p className="text-xs text-slate-400 italic">* Quét mã sản phẩm để Lưu toàn bộ dữ liệu.</p>
-          </div>
-
-          {/* Last Scan Status Display */}
-          <div className={`flex-1 flex flex-col items-center justify-center p-8 rounded-xl border-4 transition-all duration-300 shadow-inner min-h-[300px] ${
-            lastScan?.status === ScanStatus.VALID ? 'bg-green-50 border-green-200' :
-            lastScan?.status === ScanStatus.ERROR ? 'bg-red-50 border-red-200' :
-            lastScan?.status === ScanStatus.DUPLICATE ? 'bg-orange-50 border-orange-200' : 
-            'bg-white border-slate-100'
-          }`}>
-             {!lastScan ? (
-               <div className="text-center opacity-50"><Barcode size={48} className="mx-auto mb-2"/>Chờ quét...</div>
-             ) : (
-               <div className="w-full">
-                 <div className="text-center mb-6">
-                    {lastScan.status === ScanStatus.VALID && (
-                      <><CheckCircle2 className="mx-auto text-green-500 mb-2" size={60}/><h3 className="text-2xl font-black text-green-700">OK</h3></>
-                    )}
-                    {lastScan.status === ScanStatus.DUPLICATE && (
-                      <><AlertTriangle className="mx-auto text-orange-500 mb-2" size={60}/><h3 className="text-2xl font-black text-orange-700">TRÙNG</h3></>
-                    )}
-                    {lastScan.status === ScanStatus.ERROR && (
-                      <><XCircle className="mx-auto text-red-500 mb-2" size={60}/><h3 className="text-2xl font-black text-red-700">LỖI</h3></>
-                    )}
-                 </div>
-                 <div className="bg-white p-4 rounded-lg border border-slate-100 shadow-sm space-y-3">
-                    <div className="flex justify-between border-b border-slate-50 pb-2">
-                       <span className="text-xs font-bold text-slate-400">MODEL</span>
-                       <span className="text-sm font-bold text-blue-600">{lastScan.modelName}</span>
+            {/* Stats */}
+            <div className="grid grid-cols-3 gap-4">
+               <div className="col-span-3">
+                 <div className="bg-blue-600 text-white p-4 rounded-lg shadow-md">
+                    <h3 className="text-xs uppercase font-bold opacity-80 mb-1">Công đoạn đang chọn</h3>
+                    <div className="text-xl font-bold flex items-center gap-2">
+                       <Layers size={24} /> {currentStageObj?.name || `Stage ${currentStage}`}
                     </div>
-                    {testConfig.enabled && lastScan.testResult && (
-                      <div className="flex justify-between border-b border-slate-50 pb-2">
-                         <span className="text-xs font-bold text-slate-400 uppercase">{testConfig.mainResult.name}</span>
-                         <span className={`text-sm font-bold ${lastScan.testResult === testConfig.mainResult.standardValue ? 'text-green-600' : 'text-red-500'}`}>
-                           {lastScan.testResult}
-                         </span>
-                      </div>
-                    )}
-                    <div>
-                       <span className="text-xs font-bold text-slate-400 block mb-1">MÃ SẢN PHẨM</span>
-                       <span className="text-xl font-mono font-black text-slate-800 break-all">{lastScan.code}</span>
-                    </div>
-                    {lastScan.errorCode && (
-                      <div className="mt-2 pt-2 border-t border-red-100 text-center">
-                         <span className="inline-block bg-red-100 text-red-700 px-2 py-1 rounded text-xs font-black animate-pulse">
-                           {lastScan.errorCode}
-                         </span>
-                      </div>
+                    {currentEmployeeId && (
+                       <div className="mt-2 text-sm bg-blue-700/50 p-1 px-2 rounded inline-block">
+                         NV: <b>{currentEmployeeId}</b>
+                       </div>
                     )}
                  </div>
                </div>
-             )}
-          </div>
-        </div>
+               <StatCard title="OK" value={stats.success} type="success" icon={<CheckCircle size={20} />} />
+               <StatCard title="NG" value={stats.defect} type="error" icon={<XCircle size={20} />} />
+               <StatCard title="System Err" value={stats.error} type="neutral" icon={<AlertOctagon size={20} />} />
+            </div>
 
-        {/* Right Column: History */}
-        <div className="flex-1 bg-white rounded-xl shadow-sm border border-slate-200 flex flex-col overflow-hidden">
-          <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
-             <div className="flex items-center gap-2 font-bold text-slate-700"><History size={18}/> Lịch Sử</div>
-             <div className="text-xs font-bold bg-slate-200 px-2 py-1 rounded">{scans.length}</div>
+            {/* Scan Form */}
+            <div className="bg-white rounded-lg shadow-sm border border-gray-200">
+               <div className="p-4 bg-gray-50 border-b border-gray-200 font-bold text-gray-700 flex items-center gap-2">
+                 <ScanLine size={18} /> QUÉT MÃ
+               </div>
+               <div className="p-6 space-y-6">
+                  {/* Employee */}
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-600 mb-1">
+                      1. Nhân viên (Công đoạn {currentStage})
+                    </label>
+                    <div className="relative">
+                      <input
+                        ref={employeeInputRef}
+                        className={`w-full text-lg p-3 pl-10 border-2 rounded focus:outline-none ${currentEmployeeId ? 'border-green-300 bg-green-50 focus:border-green-500' : 'border-gray-300 focus:border-blue-500'}`}
+                        placeholder={currentEmployeeId ? "Đổi nhân viên..." : "Scan mã NV để bắt đầu..."}
+                        value={employeeInput}
+                        onChange={e => setEmployeeInput(e.target.value)}
+                        onKeyDown={handleEmployeeScan}
+                      />
+                      <Users className="absolute left-3 top-3.5 text-gray-400" size={20} />
+                      {currentEmployeeId && (
+                        <div className="absolute right-3 top-3.5 text-green-700 font-bold text-xs bg-green-200 px-2 py-0.5 rounded border border-green-300">
+                          {currentEmployeeId}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  
+                  <hr className="border-gray-100"/>
+
+                   {/* Defect Code Input */}
+                   <div className="bg-amber-50 p-3 rounded-md border border-amber-200">
+                    <label className="block text-sm font-bold text-amber-700 mb-1 flex items-center gap-2">
+                      <AlertTriangle size={14} />
+                      2. Mã Lỗi (Tùy chọn - Scan khi hàng NG)
+                    </label>
+                    <input
+                      ref={defectInputRef}
+                      className="w-full text-base p-2 border-2 border-amber-300 rounded focus:border-amber-500 focus:outline-none placeholder-amber-300/70"
+                      placeholder="Scan mã lỗi (Ví dụ: NG01)..."
+                      value={defectCode}
+                      onChange={e => setDefectCode(e.target.value)}
+                      onKeyDown={handleDefectScan}
+                    />
+                  </div>
+
+                  <hr className="border-gray-100"/>
+
+                  {/* Measurement Input (CONDITIONAL) */}
+                  {currentStageObj?.enableMeasurement && (
+                    <div className="animate-in fade-in slide-in-from-top-2 duration-300 space-y-4">
+                      {/* Main Measurement */}
+                      <div>
+                        <label className="block text-sm font-bold text-purple-700 mb-1 flex items-center gap-2">
+                          <Activity size={18} className="text-purple-600"/>
+                          3. Nhập {currentStageObj.measurementLabel || "Giá trị đo"} (Bắt buộc)
+                        </label>
+                        <input
+                          ref={measurementInputRef}
+                          className="w-full text-lg p-3 border-2 border-purple-300 bg-purple-50 rounded focus:border-purple-500 focus:outline-none"
+                          placeholder={currentStageObj.measurementStandard ? `Nhập giá trị (Chuẩn: ${currentStageObj.measurementStandard})...` : `Nhập ${currentStageObj.measurementLabel || "giá trị"}...`}
+                          value={measurementValue}
+                          onChange={e => setMeasurementValue(e.target.value)}
+                          onKeyDown={handleMeasurementScan}
+                        />
+                      </div>
+
+                      {/* 8 Extra Fields (Grid) */}
+                      {activeExtraFields.length > 0 && (
+                        <div className="bg-gray-50 p-3 rounded border border-gray-200">
+                           <label className="block text-xs font-bold text-gray-500 mb-2 uppercase flex items-center gap-1">
+                             <List size={12}/> Thông số mở rộng
+                           </label>
+                           {/* Updated Grid for 8 items: 2 cols */}
+                           <div className="grid grid-cols-2 gap-3">
+                              {activeExtraFields.map((field) => (
+                                <div key={field.idx}>
+                                   <label className="block text-[10px] font-bold text-gray-500 mb-1 truncate" title={field.label}>
+                                      {field.label}
+                                   </label>
+                                   <input
+                                      ref={(el) => extraInputRefs.current[field.idx] = el}
+                                      value={additionalValues[field.idx]}
+                                      onChange={(e) => updateAdditionalValue(field.idx, e.target.value)}
+                                      onKeyDown={(e) => handleExtraInputScan(e, field.idx)}
+                                      className="w-full p-2 text-sm border border-gray-300 rounded focus:border-purple-500 focus:ring-1 focus:ring-purple-200 outline-none"
+                                      placeholder={currentStageObj.additionalFieldDefaults?.[field.idx] ? "(Mặc định)" : "..."}
+                                   />
+                                </div>
+                              ))}
+                           </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Product */}
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-600 mb-1">
+                      {currentStageObj?.enableMeasurement ? "4" : "3"}. Mã IMEI máy (Enter)
+                    </label>
+                    <div className="relative">
+                      <input
+                        ref={productInputRef}
+                        disabled={errorModal.isOpen}
+                        className={`w-full text-xl font-mono p-4 pl-10 border-2 rounded shadow-inner focus:outline-none transition-colors
+                          ${errorModal.isOpen 
+                            ? 'bg-gray-100 cursor-not-allowed border-gray-300' 
+                            : defectCode 
+                              ? 'bg-amber-50 border-amber-500 ring-4 ring-amber-100'
+                              : 'bg-white border-blue-600 ring-4 ring-blue-50/50'}
+                        `}
+                        placeholder={
+                          !modelName ? "⚠️ Nhập Tên Model trước" :
+                          !currentModel ? "⚠️ Nhập Mã Kiểm Tra (IMEI)" :
+                          !currentEmployeeId ? "⚠️ Quét nhân viên trước" :
+                          defectCode ? "⚠️ SẮP GHI LỖI NG..." :
+                          "Sẵn sàng scan IMEI..."
+                        }
+                        value={productInput}
+                        onChange={e => setProductInput(e.target.value)}
+                        onKeyDown={handleProductScan}
+                      />
+                      <Box className={`absolute left-3 top-1/2 -translate-y-1/2 ${currentEmployeeId && currentModel && modelName ? (defectCode ? 'text-amber-600' : 'text-blue-600') : 'text-gray-400'}`} size={24} />
+                    </div>
+                  </div>
+               </div>
+            </div>
           </div>
-          <div className="flex-1 overflow-auto">
-            <table className="w-full text-left border-collapse">
-               <thead className="sticky top-0 bg-white shadow-sm z-10">
-                 <tr className="text-xs font-bold text-slate-500 uppercase">
-                   <th className="px-4 py-3 border-b">STT</th>
-                   <th className="px-4 py-3 border-b text-blue-600">Model</th>
-                   {testConfig.enabled && <th className="px-4 py-3 border-b text-indigo-600 text-center">{testConfig.mainResult.name}</th>}
-                   <th className="px-4 py-3 border-b">Mã SP</th>
-                   {testConfig.enabled && testConfig.parameters.map((param) => (
-                      param.name ? <th key={param.id} className="px-4 py-3 border-b text-slate-600 whitespace-nowrap">{param.name}</th> : null
-                   ))}
-                   <th className="px-4 py-3 border-b text-red-500">Lỗi</th>
-                   <th className="px-4 py-3 border-b text-right">TT</th>
-                 </tr>
-               </thead>
-               <tbody className="divide-y divide-slate-50">
-                 {scans.map(s => (
-                   <tr key={s.id} className="hover:bg-slate-50">
-                     <td className="px-4 py-3 text-slate-400 font-mono text-xs">#{s.index}</td>
-                     <td className="px-4 py-3 text-xs font-bold text-blue-600">{s.modelName}</td>
-                     {testConfig.enabled && (
-                       <td className={`px-4 py-3 font-bold text-xs text-center ${s.testResult === testConfig.mainResult.standardValue ? 'text-green-600' : 'text-red-500'}`}>
-                         {s.testResult || '-'}
-                       </td>
+
+          {/* RIGHT: HISTORY TABLE */}
+          <div className="lg:col-span-2 h-[calc(100vh-220px)] min-h-[500px]">
+            <div className="bg-white rounded-lg shadow-sm border border-gray-200 h-full flex flex-col">
+               <div className="p-4 border-b border-gray-200 bg-gray-50 flex justify-between items-center rounded-t-lg">
+                  <h3 className="font-bold text-gray-700">Lịch sử Scan</h3>
+                  <div className="text-xs flex gap-2">
+                    <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-green-500"></div> OK</span>
+                    <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-amber-500"></div> NG</span>
+                    <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-red-500"></div> Err</span>
+                  </div>
+               </div>
+               
+               <div className="flex-1 overflow-auto">
+                 <table className="w-full text-left text-sm">
+                   <thead className="bg-gray-100 text-gray-600 sticky top-0 z-0 shadow-sm">
+                     <tr>
+                       <th className="p-3 font-semibold border-b w-12">STT</th>
+                       <th className="p-3 font-semibold border-b">Mã IMEI máy</th>
+                       <th className="p-3 font-semibold border-b text-blue-700">Tên Model</th>
+                       <th className="p-3 font-semibold border-b">Công Đoạn</th>
+                       <th className="p-3 font-semibold border-b">Kết quả đo</th>
+                       <th className="p-3 font-semibold border-b">Tiến độ</th>
+                       <th className="p-3 font-semibold border-b">Nhân Viên</th>
+                       <th className="p-3 font-semibold border-b">Trạng Thái</th>
+                     </tr>
+                   </thead>
+                   <tbody className="divide-y divide-gray-100">
+                     {history.length === 0 ? (
+                       <tr><td colSpan={8} className="p-10 text-center text-gray-400">Chưa có dữ liệu</td></tr>
+                     ) : (
+                       history.map((row) => {
+                         const rowProgress = productProgress[row.productCode] || 0;
+                         const rowStageObj = stages.find(s => s.id === row.stage);
+                         const rowStageName = rowStageObj?.name || `Stage ${row.stage}`;
+                         
+                         let rowClass = "";
+                         if (row.status === 'valid') rowClass = "border-green-500 hover:bg-gray-50";
+                         else if (row.status === 'defect') rowClass = "border-amber-500 bg-amber-50 hover:bg-amber-100";
+                         else rowClass = "border-red-500 bg-red-50 hover:bg-red-100";
+                         
+                         // Helper to render extended values cleanly
+                         const renderExtended = () => {
+                           if (!row.additionalValues || row.additionalValues.every(v => !v)) return null;
+                           // Only show values that correspond to configured labels (if we can find the stage config)
+                           return (
+                             <div className="mt-1 flex flex-wrap gap-1">
+                               {row.additionalValues.map((v, i) => {
+                                 if (!v) return null;
+                                 const label = rowStageObj?.additionalFieldLabels?.[i];
+                                 return (
+                                   <span key={i} className="text-[10px] bg-purple-50 text-purple-700 px-1 rounded border border-purple-100 whitespace-nowrap">
+                                     {label ? `${label}: ` : ''}<b>{v}</b>
+                                   </span>
+                                 )
+                               })}
+                             </div>
+                           )
+                         };
+
+                         return (
+                           <tr key={row.id} className={`border-l-4 ${rowClass}`}>
+                             <td className="p-3 text-gray-500">{row.stt}</td>
+                             <td className={`p-3 font-mono font-medium ${row.status === 'error' ? 'text-red-700 line-through' : row.status === 'defect' ? 'text-amber-800' : 'text-blue-700'}`}>
+                               {row.productCode}
+                             </td>
+                             <td className="p-3 font-bold text-gray-700">
+                               {row.modelName || <span className="text-gray-300">-</span>}
+                             </td>
+                             <td className="p-3">
+                               <span className="bg-gray-100 px-2 py-1 rounded text-xs font-bold border border-gray-200 block truncate max-w-[150px]" title={rowStageName}>
+                                 {rowStageName}
+                               </span>
+                             </td>
+                             <td className="p-3">
+                                <div className="font-medium text-purple-700">{row.measurement || '-'}</div>
+                                {renderExtended()}
+                             </td>
+                             <td className="p-3">
+                               {(row.status === 'valid' || row.status === 'defect') && (
+                                 <div className="flex gap-1">
+                                    {[1,2,3,4,5].map(step => (
+                                      <div key={step} className={`w-2 h-4 rounded-sm ${step <= rowProgress ? 'bg-green-500' : 'bg-gray-200'}`} title={`Step ${step}`}/>
+                                    ))}
+                                 </div>
+                               )}
+                             </td>
+                             <td className="p-3 text-gray-900">{row.employeeId}</td>
+                             <td className="p-3">
+                               {row.status === 'valid' ? (
+                                 <div className="text-xs text-gray-500">
+                                   {format(new Date(row.timestamp), 'HH:mm:ss')}
+                                 </div>
+                               ) : row.status === 'defect' ? (
+                                  <span className="text-amber-700 font-bold text-xs flex items-center gap-1">
+                                   <XCircle size={12}/> {row.note}
+                                 </span>
+                               ) : (
+                                 <span className="text-red-600 font-bold text-xs flex items-center gap-1">
+                                   <AlertTriangle size={12}/> {row.note}
+                                 </span>
+                               )}
+                             </td>
+                           </tr>
+                         );
+                       })
                      )}
-                     <td className="px-4 py-3 font-bold text-slate-700 font-mono">{s.code}</td>
-                     {testConfig.enabled && testConfig.parameters.map((param, idx) => (
-                        param.name ? (
-                           <td key={param.id} className="px-4 py-3 text-xs text-slate-600 font-medium">
-                              {s.testParams?.[idx] || '-'}
-                           </td>
-                        ) : null
-                     ))}
-                     <td className="px-4 py-3">
-                        {s.errorCode ? (
-                           <span className="bg-red-600 text-white px-2 py-1 rounded font-black text-xs animate-pulse shadow-sm whitespace-nowrap">
-                              {s.errorCode}
-                           </span>
-                        ) : (
-                           <span className="text-slate-300 font-bold text-xs">-</span>
-                        )}
-                     </td>
-                     <td className="px-4 py-3 text-right">
-                        <span className={`px-2 py-1 rounded text-[10px] font-bold ${
-                          s.status === ScanStatus.VALID ? 'bg-green-100 text-green-700' : 
-                          s.status === ScanStatus.ERROR ? 'bg-red-100 text-red-700' : 
-                          'bg-orange-100 text-orange-700'
-                        }`}>
-                          {s.status === ScanStatus.VALID ? 'OK' : 
-                           s.status === ScanStatus.ERROR ? 'LỖI' : 'TRÙNG'}
-                        </span>
-                     </td>
-                   </tr>
-                 ))}
-               </tbody>
-            </table>
+                   </tbody>
+                 </table>
+               </div>
+            </div>
           </div>
-        </div>
       </main>
 
-      {/* Warnings */}
-      {showDuplicateWarning && (
-        <div className="fixed inset-0 pointer-events-none flex items-center justify-center z-50">
-          <div className="bg-red-600 text-white px-8 py-6 rounded-xl shadow-2xl flex flex-col items-center animate-bounce border-4 border-red-400">
-            <AlertTriangle size={48} className="mb-2" />
-            <h2 className="text-2xl font-black">ĐÃ TỒN TẠI!</h2>
-          </div>
-        </div>
-      )}
-      {showMissingModelWarning && (
-        <div className="fixed inset-0 pointer-events-none flex items-center justify-center z-50">
-          <div className="bg-slate-800 text-white px-8 py-6 rounded-xl shadow-2xl flex flex-col items-center border-4 border-red-500 animate-pulse">
-            <FileWarning size={48} className="mb-2 text-red-500" />
-            <h2 className="text-2xl font-black text-red-500">CHƯA NHẬP MODEL</h2>
-          </div>
-        </div>
-      )}
-      {/* Missing Test Data Warning */}
-      {showMissingDataWarning && (
-        <div className="fixed inset-0 pointer-events-none flex items-center justify-center z-50">
-          <div className="bg-red-600 text-white px-12 py-10 rounded-3xl shadow-[0_20px_60px_rgba(220,38,38,0.6)] flex flex-col items-center border-8 border-red-400 animate-pulse transform scale-110">
-            <div className="bg-white p-4 rounded-full mb-6 shadow-inner">
-               <X size={64} className="text-red-600" strokeWidth={4} />
-            </div>
-            {/* BIG ERROR TEXT */}
-            <h1 className="text-7xl font-black text-white uppercase tracking-widest mb-2 drop-shadow-xl">LỖI</h1>
-            <h2 className="text-xl font-bold text-red-100 uppercase tracking-wider mb-2">DỮ LIỆU CHƯA ĐỦ!</h2>
-            <p className="font-bold text-red-50 text-lg text-center leading-snug">
-               Vui lòng điền hết các ô <br/>
-               <span className="text-yellow-300 underline decoration-4 underline-offset-4">THÔNG SỐ TEST</span>
-            </p>
-          </div>
-        </div>
-      )}
+      <ErrorModal isOpen={errorModal.isOpen} message={errorModal.message} onClose={handleCloseError} />
+
+      <StageSettingsModal 
+        isOpen={isSettingsOpen}
+        stages={stages}
+        onSave={setStages}
+        onClose={() => setIsSettingsOpen(false)}
+      />
     </div>
   );
-};
-
-export default App;
+}
