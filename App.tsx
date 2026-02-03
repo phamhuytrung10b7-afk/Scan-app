@@ -1,7 +1,8 @@
+// ... (previous imports)
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Download, ScanLine, Users, CheckCircle, AlertOctagon, RefreshCw, Box, Settings, AlertTriangle, Layers, Edit, XCircle, Activity, List, Tag, Upload, Maximize, Minimize } from 'lucide-react';
+import { Download, ScanLine, Users, CheckCircle, AlertOctagon, RefreshCw, Box, Settings, AlertTriangle, Layers, Edit, XCircle, Activity, List, Tag, Upload, Maximize, Minimize, ClipboardList, AlertCircle } from 'lucide-react';
 import { format } from 'date-fns';
-import { read, utils } from 'xlsx';
+import { read, utils, writeFile } from 'xlsx';
 
 import { ScanRecord, Stats, ErrorState, DEFAULT_PROCESS_STAGES, Stage } from './types';
 import { Button } from './Button';
@@ -13,22 +14,40 @@ export default function App() {
   // --- STATE ---
   
   // Configuration
-  const [stageEmployees, setStageEmployees] = useState<Record<number, string>>({});
-  const [currentModel, setCurrentModel] = useState<string>(''); // Used for IMEI Validation (Space separated list)
-  const [modelName, setModelName] = useState<string>(''); // New: Actual Model Name
+  const [stageEmployees, setStageEmployees] = useState<Record<number, string>>(() => {
+    try {
+      const saved = localStorage.getItem('proscan_employees');
+      return saved ? JSON.parse(saved) : {};
+    } catch (e) { return {}; }
+  });
+
+  const [currentModel, setCurrentModel] = useState<string>(() => {
+    return localStorage.getItem('proscan_current_model') || '';
+  }); // Header Input: Simple "Session Plan" Validation
+
+  const [modelName, setModelName] = useState<string>(() => {
+    return localStorage.getItem('proscan_model_name') || '';
+  }); // New: Actual Model Name
   
   // Dynamic Stages with LocalStorage Persistence
   const [stages, setStages] = useState<Stage[]>(() => {
     try {
       const saved = localStorage.getItem('proscan_stages');
       if (saved) {
-        // Migration support for old data
         const parsed = JSON.parse(saved);
+        // FORCE RESET if old data has more than 1 stage (Migration to Single Stage App)
+        if (Array.isArray(parsed) && parsed.length > 1) {
+             return DEFAULT_PROCESS_STAGES;
+        }
+
         return parsed.map((s: any) => ({
           ...s,
           // Update default array size from potential old/new sizes to 8
           additionalFieldLabels: s.additionalFieldLabels ? [...s.additionalFieldLabels, ...Array(8).fill("")].slice(0, 8) : Array(8).fill(""),
-          additionalFieldDefaults: s.additionalFieldDefaults ? [...s.additionalFieldDefaults, ...Array(8).fill("")].slice(0, 8) : Array(8).fill("")
+          additionalFieldDefaults: s.additionalFieldDefaults ? [...s.additionalFieldDefaults, ...Array(8).fill("")].slice(0, 8) : Array(8).fill(""),
+          additionalFieldValidationLists: s.additionalFieldValidationLists ? [...s.additionalFieldValidationLists, ...Array(8).fill("")].slice(0, 8) : Array(8).fill(""),
+          // Ensure validationRules exists (keeping for data compatibility even if unused logic)
+          validationRules: s.validationRules || []
         }));
       }
     } catch (e) {
@@ -37,18 +56,33 @@ export default function App() {
     return DEFAULT_PROCESS_STAGES;
   });
 
-  // Ensure currentStage is valid initially (fallback to first available stage)
-  const [currentStage, setCurrentStage] = useState<number>(() => {
-    return stages.length > 0 ? stages[0].id : 1;
-  });
+  // Always Stage 1
+  const [currentStage] = useState<number>(1);
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   // Data
-  const [history, setHistory] = useState<ScanRecord[]>([]);
-  const [productProgress, setProductProgress] = useState<Record<string, number>>({});
-  const [productStatus, setProductStatus] = useState<Record<string, 'valid' | 'defect'>>({});
+  const [history, setHistory] = useState<ScanRecord[]>(() => {
+    try {
+      const saved = localStorage.getItem('proscan_history');
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) { return []; }
+  });
+
+  const [productProgress, setProductProgress] = useState<Record<string, number>>(() => {
+    try {
+      const saved = localStorage.getItem('proscan_progress');
+      return saved ? JSON.parse(saved) : {};
+    } catch (e) { return {}; }
+  });
+
+  const [productStatus, setProductStatus] = useState<Record<string, 'valid' | 'defect'>>(() => {
+    try {
+      const saved = localStorage.getItem('proscan_status');
+      return saved ? JSON.parse(saved) : {};
+    } catch (e) { return {}; }
+  });
   
   // UI State
   const [stats, setStats] = useState<Stats>({ success: 0, defect: 0, error: 0 });
@@ -74,27 +108,36 @@ export default function App() {
   // Refs for 8 additional inputs
   const extraInputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
-  // --- EFFECT: Save Stages to LocalStorage ---
-  useEffect(() => {
-    localStorage.setItem('proscan_stages', JSON.stringify(stages));
-  }, [stages]);
+  // --- DERIVED STATE: Plan List & Progress ---
+  const planList = useMemo(() => {
+      if (!currentModel.trim()) return [];
+      // Split by whitespace to get individual codes
+      return currentModel.trim().split(/\s+/).map(s => s.trim().toUpperCase()).filter(s => s.length > 0);
+  }, [currentModel]);
+
+  // Calculate stats
+  const validScanCount = history.filter(r => r.status === 'valid').length;
+  const defectScanCount = history.filter(r => r.status === 'defect').length;
+  const errorScanCount = history.filter(r => r.status === 'error').length;
+
+  // --- PERSISTENCE EFFECTS ---
+  // Automatically save data whenever it changes
+  useEffect(() => { localStorage.setItem('proscan_employees', JSON.stringify(stageEmployees)); }, [stageEmployees]);
+  useEffect(() => { localStorage.setItem('proscan_current_model', currentModel); }, [currentModel]);
+  useEffect(() => { localStorage.setItem('proscan_model_name', modelName); }, [modelName]);
+  useEffect(() => { localStorage.setItem('proscan_history', JSON.stringify(history)); }, [history]);
+  useEffect(() => { localStorage.setItem('proscan_progress', JSON.stringify(productProgress)); }, [productProgress]);
+  useEffect(() => { localStorage.setItem('proscan_status', JSON.stringify(productStatus)); }, [productStatus]);
+  useEffect(() => { localStorage.setItem('proscan_stages', JSON.stringify(stages)); }, [stages]);
 
   // --- EFFECT: Calculate Stats for Current Stage ---
   useEffect(() => {
-    const currentStageSuccess = history.filter(
-      r => r.status === 'valid' && r.stage === currentStage
-    ).length;
-
-    const currentStageDefect = history.filter(
-      r => r.status === 'defect' && r.stage === currentStage
-    ).length;
-    
-    setStats(prev => ({ 
-      ...prev, 
-      success: currentStageSuccess,
-      defect: currentStageDefect
-    }));
-  }, [history, currentStage]);
+    setStats({ 
+      success: validScanCount,
+      defect: defectScanCount,
+      error: errorScanCount
+    });
+  }, [history, validScanCount, defectScanCount, errorScanCount]);
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -105,7 +148,7 @@ export default function App() {
   }, []);
 
   // --- HELPER: Get Current Stage Object & Employee ---
-  const currentStageObj = useMemo(() => stages.find(s => s.id === currentStage), [stages, currentStage]);
+  const currentStageObj = useMemo(() => stages.find(s => s.id === currentStage) || stages[0], [stages, currentStage]);
   const currentEmployeeId = stageEmployees[currentStage];
   
   // Determine active extra fields (those with labels)
@@ -273,8 +316,6 @@ export default function App() {
   };
 
   const handleError = (message: string, scannedCode: string = '') => {
-    setStats(prev => ({ ...prev, error: prev.error + 1 }));
-    
     const errorRecord: ScanRecord = {
       id: crypto.randomUUID(),
       stt: history.length + 1,
@@ -364,26 +405,25 @@ export default function App() {
       const code = productInput.trim();
       if (!code) return;
 
-      // VALIDATIONS
+      // --- VALIDATIONS ---
+
       // 0. Model Name Check (MANDATORY)
       if (!modelName.trim()) return handleError("Lỗi: Chưa nhập Tên Model.", code);
 
-      // 1. Check if Validation List is Configured
-      if (!currentModel.trim()) return handleError("Lỗi: Chưa cài đặt Danh sách Mã chuẩn (Validation List).", code);
-      
-      // 2. Parse Valid Patterns (Split by whitespace)
-      // REGEX: /\s+/ matches one or more whitespace characters
-      const validPatterns = currentModel.trim().split(/\s+/).map(s => s.trim().toUpperCase()).filter(s => s.length > 0);
-      
-      // 3. Employee Check
-      if (!currentEmployeeId) return handleError(`Lỗi: Chưa xác định nhân viên cho công đoạn ${currentStage}.`, code);
-      
-      // 4. Validate Code against Patterns (Contains ANY)
-      const isMatch = validPatterns.some(pattern => code.toUpperCase().includes(pattern));
-      if (!isMatch) {
-         // Simplified Error Message as requested
-         return handleError(`Lỗi: Mã không nằm trong kế hoạch sản xuất.\nMã quét: ${code}`, code);
+      // 3. Employee Check (Must be before logic)
+      if (!currentEmployeeId) return handleError(`Lỗi: Chưa xác định nhân viên cho công đoạn này.`, code);
+
+      // --- CHECK: HEADER "QUICK PLAN" LIST (Optional but if exists, strictly enforced) ---
+      if (currentModel.trim()) {
+         const validPatterns = currentModel.trim().split(/\s+/).map(s => s.trim().toUpperCase()).filter(s => s.length > 0);
+         // Check if contains ANY
+         const isMatch = validPatterns.some(pattern => code.toUpperCase().includes(pattern));
+         if (!isMatch) {
+            return handleError(`Lỗi: Mã không nằm trong "MÃ KIỂM TRA (LIST)" trên header.\nMã quét: ${code}`, code);
+         }
       }
+
+      // REMOVED: STAGE SPECIFIC VALIDATION RULES (Configurable) Logic
 
       if (defectCode.trim()) {
         handleDefectRecord(code, defectCode);
@@ -418,29 +458,32 @@ export default function App() {
           }
         }
         
-        // Validate Additional Fields
+        // Validate Additional Fields and Check Lists
         for (const field of activeExtraFields) {
-           if (!additionalValues[field.idx].trim()) {
+           const fieldVal = additionalValues[field.idx].trim();
+           if (!fieldVal) {
              extraInputRefs.current[field.idx]?.focus();
              return handleError(`Lỗi: Chưa nhập giá trị cho "${field.label}".`, code);
+           }
+
+           // Check Validation List (Whitelist) if it exists
+           const whitelistString = currentStageObj.additionalFieldValidationLists?.[field.idx];
+           if (whitelistString && whitelistString.trim()) {
+              const allowedValues = whitelistString.trim().split(/\s+/).map(s => s.toUpperCase());
+              if (allowedValues.length > 0 && !allowedValues.includes(fieldVal.toUpperCase())) {
+                 extraInputRefs.current[field.idx]?.focus();
+                 return handleError(`LỖI: Giá trị "${fieldVal}" không nằm trong danh sách cho phép của "${field.label}".`, code);
+              }
            }
         }
       }
 
-      // LOGIC CHECKS
+      // LOGIC CHECKS: DUPLICATE
       const currentProgress = productProgress[code] || 0;
-      const lastStatus = productStatus[code];
-
-      if (lastStatus === 'defect') {
-        if (currentStage > currentProgress + 1) {
-           return handleError("⛔ CẢNH BÁO: Sản phẩm bị LỖI (NG) chưa được xử lý.", code);
-        }
-      }
+      
+      // Duplicate check in single stage mode
       if (currentProgress >= currentStage) {
-        return handleError(`Lỗi: Mã đã PASS công đoạn ${currentStage} trước đó.`, code);
-      }
-      if (currentStage > 1 && currentProgress < currentStage - 1) {
-        return handleError(`Lỗi: Sai trình tự. Chưa hoàn thành công đoạn ${currentStage - 1}.`, code);
+        return handleError(`Lỗi: Mã này đã được quét thành công trước đó.`, code);
       }
 
       handleSuccess(code);
@@ -464,7 +507,7 @@ export default function App() {
     }, 50);
   };
 
-  const exportCSV = useCallback(() => {
+  const exportExcel = useCallback(() => {
     // 1. Calculate Dynamic Headers based on ALL stages configuration
     // We create a definition map to know which column pulls from which data index
     const dynamicColsDef: { header: string, stageId: number, valueIndex: number }[] = [];
@@ -474,10 +517,8 @@ export default function App() {
         if (stage.additionalFieldLabels?.some(l => l && l.trim())) {
              stage.additionalFieldLabels.forEach((label, idx) => {
                  if (label && label.trim()) {
-                     // Create a header like "S1: Voltage" or "Stage 1 - Voltage"
-                     // Using specific stage name prefix to avoid ambiguity
                      dynamicColsDef.push({
-                         header: `${stage.name} - ${label}`,
+                         header: `${label}`, // Removed stage name prefix since it is single stage
                          stageId: stage.id,
                          valueIndex: idx
                      });
@@ -486,61 +527,49 @@ export default function App() {
         }
     });
 
-    // 2. Prepare full Header row
-    const headers = [
-        "STT", 
-        "Mã IMEI máy", 
-        "Tên Model", 
-        "Mã Kiểm Tra (IMEI)", 
-        "Công Đoạn", 
-        "Kết quả chính", 
-        ...dynamicColsDef.map(d => d.header), // The expanded dynamic columns
-        "Nhân Viên", 
-        "Thời Gian", 
-        "Trạng Thái", 
-        "Ghi Chú"
-    ];
-    
-    // 3. Map Data Rows
-    const rows = history.map(item => {
-      const stageObj = stages.find(s => s.id === item.stage);
-      const stageName = stageObj?.name || `Công đoạn ${item.stage}`;
-      
+    // 2. Prepare Data Rows
+    const data = history.map(item => {
       let statusText = 'LỖI';
       if (item.status === 'valid') statusText = 'OK';
       if (item.status === 'defect') statusText = 'NG (Hàng Lỗi)';
       
-      // Map the dynamic columns
-      const dynamicCells = dynamicColsDef.map(def => {
-          // Only fill data if the record belongs to the column's stage
+      const row: any = {
+        "STT": item.stt,
+        "Mã IMEI máy": item.productCode,
+        "Tên Model": item.modelName || '',
+        "Mã Kiểm Tra (IMEI)": item.model,
+        "Kết quả chính": item.measurement || '-',
+      };
+
+      // Fill dynamic columns
+      dynamicColsDef.forEach(def => {
           if (item.stage === def.stageId) {
-              return item.additionalValues?.[def.valueIndex] || "-";
+              row[def.header] = item.additionalValues?.[def.valueIndex] || "-";
+          } else {
+              row[def.header] = "";
           }
-          return ""; // Empty cell for irrelevant stages
       });
 
-      return [
-        item.stt,
-        item.productCode,
-        item.modelName || '',
-        item.model,
-        stageName,
-        item.measurement || '-',
-        ...dynamicCells,
-        item.employeeId,
-        format(new Date(item.timestamp), 'yyyy-MM-dd HH:mm:ss'),
-        statusText,
-        item.note || ''
-      ];
+      row["Nhân Viên"] = item.employeeId;
+      row["Thời Gian"] = format(new Date(item.timestamp), 'yyyy-MM-dd HH:mm:ss');
+      row["Trạng Thái"] = statusText;
+      row["Ghi Chú"] = item.note || '';
+
+      return row;
     });
 
-    const csvContent = [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
-    const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement("a");
-    const url = URL.createObjectURL(blob);
-    link.setAttribute("href", url);
-    link.setAttribute("download", `scan_process_data_${format(new Date(), 'yyyyMMdd_HHmmss')}.csv`);
-    link.click();
+    // 3. Create Workbook and Worksheet
+    const worksheet = utils.json_to_sheet(data);
+    
+    // Auto-width columns (simple estimation)
+    const wscols = Object.keys(data[0] || {}).map(key => ({ wch: key.length + 5 }));
+    worksheet['!cols'] = wscols;
+
+    const workbook = utils.book_new();
+    utils.book_append_sheet(workbook, worksheet, "Scan Data");
+    
+    // 4. Write File (using .xls extension for "old version" compatibility)
+    writeFile(workbook, `scan_process_data_${format(new Date(), 'yyyyMMdd_HHmmss')}.xls`);
   }, [history, stages]);
 
   const resetSession = () => {
@@ -560,44 +589,26 @@ export default function App() {
     }
   };
 
-  const handleStageChange = (newStageId: number) => {
-    setCurrentStage(newStageId);
-    setMeasurementValue('');
-    
-    const newStage = stages.find(s => s.id === newStageId);
-    const empForNewStage = stageEmployees[newStageId];
-    
-    setTimeout(() => {
-        if (!empForNewStage) {
-            employeeInputRef.current?.focus();
-        } else if (newStage?.enableMeasurement) {
-            measurementInputRef.current?.focus();
-        } else {
-            productInputRef.current?.focus();
-        }
-    }, 50);
-  };
-
   return (
-    <div className="min-h-screen flex flex-col bg-gray-100">
+    <div className="min-h-screen flex flex-col bg-gray-100 font-sans">
       {/* Header */}
-      <header className="bg-slate-900 text-white p-4 shadow-lg sticky top-0 z-20">
-        <div className="w-full px-4 flex flex-col md:flex-row items-center justify-between gap-4">
+      <header className="bg-slate-900 text-white p-3 shadow-lg sticky top-0 z-20">
+        <div className="w-full px-2 flex flex-col md:flex-row items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className="bg-blue-600 p-2 rounded-lg shadow-blue-500/50 shadow-lg">
-              <ScanLine size={28} />
+              <ScanLine size={24} />
             </div>
             <div>
-              <h1 className="text-2xl font-bold tracking-tight">ProScan Process Gate</h1>
-              <p className="text-slate-400 text-xs uppercase tracking-wider">Ver 3.6 (8 Params)</p>
+              <h1 className="text-xl font-bold tracking-tight">ProScan Single Station</h1>
+              <p className="text-slate-400 text-[10px] uppercase tracking-wider">Ver 4.1 (Unified)</p>
             </div>
           </div>
           
-          <div className="flex flex-col md:flex-row items-center gap-3 w-full md:w-auto">
+          <div className="flex flex-col md:flex-row items-center gap-2 w-full md:w-auto">
              
              {/* New: Actual Model Name */}
-             <div className="flex items-center bg-slate-800 rounded px-3 py-1 border border-slate-700">
-                 <Tag size={16} className="text-slate-400 mr-2" />
+             <div className="flex items-center bg-slate-800 rounded px-2 py-1 border border-slate-700">
+                 <Tag size={14} className="text-slate-400 mr-2" />
                  <input
                     ref={modelNameRef}
                     type="text"
@@ -609,8 +620,8 @@ export default function App() {
              </div>
 
              {/* Existing: Model/IMEI Validation with Upload */}
-             <div className="flex items-center bg-slate-800 rounded px-3 py-1 border border-slate-700">
-                 <Settings size={16} className="text-slate-400 mr-2" />
+             <div className="flex items-center bg-slate-800 rounded px-2 py-1 border border-slate-700">
+                 <Settings size={14} className="text-slate-400 mr-2" />
                  <div className="flex items-center">
                     <input
                         ref={modelInputRef}
@@ -622,7 +633,7 @@ export default function App() {
                         onChange={(e) => setCurrentModel(e.target.value.toUpperCase())}
                       />
                       <label className="cursor-pointer hover:bg-slate-600 p-1 rounded transition-colors ml-1" title="Upload Excel (Cột A)">
-                        <Upload size={16} className="text-green-400" />
+                        <Upload size={14} className="text-green-400" />
                         <input 
                           type="file" 
                           className="hidden" 
@@ -632,102 +643,107 @@ export default function App() {
                       </label>
                  </div>
              </div>
-             
-             <Button onClick={() => setIsSettingsOpen(true)} className="text-sm bg-slate-700 hover:bg-slate-600 border border-slate-600" title="Cấu hình công đoạn">
-               <Edit size={16} />
-             </Button>
-             
-             <Button onClick={toggleFullScreen} className="text-sm bg-slate-700 hover:bg-slate-600 border border-slate-600" title="Toàn màn hình">
-                {isFullscreen ? <Minimize size={16} /> : <Maximize size={16} />}
-             </Button>
 
-            <Button onClick={exportCSV} variant="success" className="text-sm">
-              <Download size={16} className="mr-1 inline" /> Excel
-            </Button>
-            <Button onClick={resetSession} variant="secondary" className="text-sm">
-              <RefreshCw size={16} className="mr-1 inline" /> Reset
-            </Button>
+             {/* Progress Counter */}
+             {planList.length > 0 && (
+                 <div className="flex items-center bg-slate-800 rounded px-2 py-1 border border-slate-700 h-9 animate-in fade-in" title="Tiến độ quét theo danh sách đã nhập">
+                     <div className="flex flex-col items-end mr-2 leading-none justify-center h-full">
+                         <span className="text-[8px] text-slate-400 font-bold uppercase tracking-wider">Tiến độ</span>
+                     </div>
+                     <div className="flex items-baseline gap-1">
+                        <span className={`text-lg font-black font-mono leading-none ${validScanCount >= planList.length ? 'text-green-400' : 'text-yellow-400'}`}>
+                          {validScanCount}
+                        </span>
+                        <span className="text-slate-600 font-light text-xs">/</span>
+                        <span className="text-xs font-bold text-slate-300 font-mono leading-none">{planList.length}</span>
+                     </div>
+                 </div>
+             )}
+             
+             <div className="flex items-center gap-1">
+                <Button onClick={() => setIsSettingsOpen(true)} className="text-xs p-2 bg-slate-700 hover:bg-slate-600 border border-slate-600" title="Cấu hình công đoạn">
+                  <Edit size={14} />
+                </Button>
+                
+                <Button onClick={toggleFullScreen} className="text-xs p-2 bg-slate-700 hover:bg-slate-600 border border-slate-600" title="Toàn màn hình">
+                    {isFullscreen ? <Minimize size={14} /> : <Maximize size={14} />}
+                </Button>
+
+                <Button onClick={exportExcel} variant="success" className="text-xs py-2 px-3">
+                  <Download size={14} className="mr-1 inline" /> Excel
+                </Button>
+                <Button onClick={resetSession} variant="secondary" className="text-xs py-2 px-3">
+                  <RefreshCw size={14} className="mr-1 inline" /> Reset
+                </Button>
+             </div>
           </div>
         </div>
       </header>
-
-      {/* STAGE SELECTOR BAR */}
-      <div className="bg-white border-b border-gray-200 shadow-sm sticky top-[72px] z-10">
-        <div className="w-full px-2 p-2 overflow-x-auto">
-           <div className="flex space-x-2 min-w-max">
-             {stages.map((stage) => {
-               const hasEmp = !!stageEmployees[stage.id];
-               return (
-               <button
-                 key={stage.id}
-                 onClick={() => handleStageChange(stage.id)}
-                 className={`flex items-center px-4 py-3 rounded-lg border-2 transition-all duration-200 font-bold text-sm ${
-                   currentStage === stage.id
-                     ? 'bg-blue-600 border-blue-600 text-white shadow-md scale-105'
-                     : 'bg-gray-50 border-gray-200 text-gray-500 hover:bg-gray-100 hover:border-gray-300'
-                 }`}
-               >
-                 <span className={`flex items-center justify-center w-6 h-6 rounded-full mr-2 text-xs border ${
-                    currentStage === stage.id ? 'bg-white text-blue-600 border-white' : hasEmp ? 'bg-green-500 text-white border-green-500' : 'bg-gray-300 text-white border-gray-300'
-                 }`}>
-                   {stage.id}
-                 </span>
-                 {stage.name}
-               </button>
-             )})}
-           </div>
-        </div>
-      </div>
 
       {/* Main Content */}
       <main className="flex-1 p-4 md:p-6 w-full grid grid-cols-1 lg:grid-cols-3 gap-6">
           
           {/* LEFT: INPUTS & STATS */}
-          <div className="lg:col-span-1 space-y-6">
+          <div className="lg:col-span-1 space-y-4">
             
-            {/* Stats */}
-            <div className="grid grid-cols-3 gap-4">
-               <div className="col-span-3">
-                 <div className="bg-blue-600 text-white p-4 rounded-lg shadow-md">
-                    <h3 className="text-xs uppercase font-bold opacity-80 mb-1">Công đoạn đang chọn</h3>
-                    <div className="text-xl font-bold flex items-center gap-2">
-                       <Layers size={24} /> {currentStageObj?.name || `Stage ${currentStage}`}
+            {/* 1. Stage Info Card */}
+            <div className="bg-blue-600 text-white p-4 rounded-lg shadow-md flex flex-col justify-center">
+                <h3 className="text-[10px] uppercase font-bold opacity-70 mb-1">CÔNG ĐOẠN LÀM VIỆC</h3>
+                <div className="text-lg font-bold flex items-center gap-2 truncate">
+                    <Layers size={20} /> <span className="truncate">{currentStageObj?.name || `Trạm kiểm tra`}</span>
+                </div>
+                {currentEmployeeId && (
+                    <div className="mt-1 text-xs bg-blue-700/50 p-0.5 px-2 rounded inline-block w-fit">
+                        NV: <b>{currentEmployeeId}</b>
                     </div>
-                    {currentEmployeeId && (
-                       <div className="mt-2 text-sm bg-blue-700/50 p-1 px-2 rounded inline-block">
-                         NV: <b>{currentEmployeeId}</b>
-                       </div>
-                    )}
-                 </div>
-               </div>
-               <StatCard title="OK" value={stats.success} type="success" icon={<CheckCircle size={20} />} />
-               <StatCard title="NG" value={stats.defect} type="error" icon={<XCircle size={20} />} />
-               <StatCard title="System Err" value={stats.error} type="neutral" icon={<AlertOctagon size={20} />} />
+                )}
             </div>
 
-            {/* Scan Form */}
+            {/* 2. Stats Grid (3 Cards) */}
+            <div className="grid grid-cols-3 gap-3">
+                <StatCard 
+                  title="OK" 
+                  value={validScanCount} 
+                  type="success" 
+                  icon={<CheckCircle size={20} />} 
+                />
+                <StatCard 
+                  title="NG" 
+                  value={defectScanCount} 
+                  type="danger" 
+                  icon={<XCircle size={20} />} 
+                />
+                <StatCard 
+                  title="SYSTEM ERR" 
+                  value={errorScanCount} 
+                  type="neutral" 
+                  icon={<AlertCircle size={20} />} 
+                />
+            </div>
+
+            {/* 3. Scan Form */}
             <div className="bg-white rounded-lg shadow-sm border border-gray-200">
-               <div className="p-4 bg-gray-50 border-b border-gray-200 font-bold text-gray-700 flex items-center gap-2">
-                 <ScanLine size={18} /> QUÉT MÃ
+               <div className="p-3 bg-gray-50 border-b border-gray-200 font-bold text-gray-700 flex items-center gap-2 text-sm uppercase tracking-wide">
+                 <ScanLine size={16} /> QUÉT MÃ
                </div>
-               <div className="p-6 space-y-6">
+               <div className="p-4 space-y-5">
                   {/* Employee */}
                   <div>
-                    <label className="block text-sm font-semibold text-gray-600 mb-1">
-                      1. Nhân viên (Công đoạn {currentStage})
+                    <label className="block text-xs font-bold text-gray-600 mb-1">
+                      1. Nhân viên
                     </label>
                     <div className="relative">
                       <input
                         ref={employeeInputRef}
-                        className={`w-full text-lg p-3 pl-10 border-2 rounded focus:outline-none ${currentEmployeeId ? 'border-green-300 bg-green-50 focus:border-green-500' : 'border-gray-300 focus:border-blue-500'}`}
+                        className={`w-full text-base p-2.5 pl-9 border rounded focus:outline-none transition-colors ${currentEmployeeId ? 'border-green-300 bg-green-50 focus:border-green-500' : 'border-gray-300 focus:border-blue-500'}`}
                         placeholder={currentEmployeeId ? "Đổi nhân viên..." : "Scan mã NV để bắt đầu..."}
                         value={employeeInput}
                         onChange={e => setEmployeeInput(e.target.value)}
                         onKeyDown={handleEmployeeScan}
                       />
-                      <Users className="absolute left-3 top-3.5 text-gray-400" size={20} />
+                      <Users className="absolute left-2.5 top-3 text-gray-400" size={18} />
                       {currentEmployeeId && (
-                        <div className="absolute right-3 top-3.5 text-green-700 font-bold text-xs bg-green-200 px-2 py-0.5 rounded border border-green-300">
+                        <div className="absolute right-2 top-2.5 text-green-700 font-bold text-[10px] bg-green-200 px-1.5 py-0.5 rounded border border-green-300">
                           {currentEmployeeId}
                         </div>
                       )}
@@ -737,14 +753,14 @@ export default function App() {
                   <hr className="border-gray-100"/>
 
                    {/* Defect Code Input */}
-                   <div className="bg-amber-50 p-3 rounded-md border border-amber-200">
-                    <label className="block text-sm font-bold text-amber-700 mb-1 flex items-center gap-2">
-                      <AlertTriangle size={14} />
+                   <div className="bg-amber-50 p-2.5 rounded-md border border-amber-200">
+                    <label className="block text-xs font-bold text-amber-700 mb-1 flex items-center gap-1">
+                      <AlertTriangle size={12} />
                       2. Mã Lỗi (Tùy chọn - Scan khi hàng NG)
                     </label>
                     <input
                       ref={defectInputRef}
-                      className="w-full text-base p-2 border-2 border-amber-300 rounded focus:border-amber-500 focus:outline-none placeholder-amber-300/70"
+                      className="w-full text-base p-2 border border-amber-300 rounded focus:border-amber-500 focus:outline-none placeholder-amber-300/70 bg-white"
                       placeholder="Scan mã lỗi (Ví dụ: NG01)..."
                       value={defectCode}
                       onChange={e => setDefectCode(e.target.value)}
@@ -756,16 +772,16 @@ export default function App() {
 
                   {/* Measurement Input (CONDITIONAL) */}
                   {currentStageObj?.enableMeasurement && (
-                    <div className="animate-in fade-in slide-in-from-top-2 duration-300 space-y-4">
+                    <div className="animate-in fade-in slide-in-from-top-2 duration-300 space-y-3">
                       {/* Main Measurement */}
                       <div>
-                        <label className="block text-sm font-bold text-purple-700 mb-1 flex items-center gap-2">
-                          <Activity size={18} className="text-purple-600"/>
-                          3. Nhập {currentStageObj.measurementLabel || "Giá trị đo"} (Bắt buộc)
+                        <label className="block text-xs font-bold text-purple-700 mb-1 flex items-center gap-1">
+                          <Activity size={14} className="text-purple-600"/>
+                          3. Nhập {currentStageObj.measurementLabel || "Kết quả Test"} (Bắt buộc)
                         </label>
                         <input
                           ref={measurementInputRef}
-                          className="w-full text-lg p-3 border-2 border-purple-300 bg-purple-50 rounded focus:border-purple-500 focus:outline-none"
+                          className="w-full text-base p-2.5 border-2 border-purple-300 bg-purple-50 rounded focus:border-purple-500 focus:outline-none placeholder-purple-300"
                           placeholder={currentStageObj.measurementStandard ? `Nhập giá trị (Chuẩn: ${currentStageObj.measurementStandard})...` : `Nhập ${currentStageObj.measurementLabel || "giá trị"}...`}
                           value={measurementValue}
                           onChange={e => setMeasurementValue(e.target.value)}
@@ -775,23 +791,23 @@ export default function App() {
 
                       {/* 8 Extra Fields (Grid) */}
                       {activeExtraFields.length > 0 && (
-                        <div className="bg-gray-50 p-3 rounded border border-gray-200">
-                           <label className="block text-xs font-bold text-gray-500 mb-2 uppercase flex items-center gap-1">
-                             <List size={12}/> Thông số mở rộng
+                        <div className="bg-gray-50 p-2 rounded border border-gray-200">
+                           <label className="block text-[10px] font-bold text-gray-500 mb-2 uppercase flex items-center gap-1">
+                             <List size={10}/> Thông số mở rộng
                            </label>
                            {/* Updated Grid for 8 items: 2 cols */}
-                           <div className="grid grid-cols-2 gap-3">
+                           <div className="grid grid-cols-2 gap-2">
                               {activeExtraFields.map((field) => (
                                 <div key={field.idx}>
-                                   <label className="block text-[10px] font-bold text-gray-500 mb-1 truncate" title={field.label}>
+                                   <label className="block text-[9px] font-bold text-gray-500 mb-0.5 truncate" title={field.label}>
                                       {field.label}
                                    </label>
                                    <input
-                                      ref={(el) => extraInputRefs.current[field.idx] = el}
+                                      ref={(el) => { extraInputRefs.current[field.idx] = el; }}
                                       value={additionalValues[field.idx]}
                                       onChange={(e) => updateAdditionalValue(field.idx, e.target.value)}
                                       onKeyDown={(e) => handleExtraInputScan(e, field.idx)}
-                                      className="w-full p-2 text-sm border border-gray-300 rounded focus:border-purple-500 focus:ring-1 focus:ring-purple-200 outline-none"
+                                      className="w-full p-1.5 text-xs border border-gray-300 rounded focus:border-purple-500 focus:ring-1 focus:ring-purple-200 outline-none"
                                       placeholder={currentStageObj.additionalFieldDefaults?.[field.idx] ? "(Mặc định)" : "..."}
                                    />
                                 </div>
@@ -804,23 +820,23 @@ export default function App() {
 
                   {/* Product */}
                   <div>
-                    <label className="block text-sm font-semibold text-gray-600 mb-1">
+                    <label className="block text-xs font-bold text-gray-600 mb-1">
                       {currentStageObj?.enableMeasurement ? "4" : "3"}. Mã IMEI máy (Enter)
                     </label>
                     <div className="relative">
                       <input
                         ref={productInputRef}
                         disabled={errorModal.isOpen}
-                        className={`w-full text-xl font-mono p-4 pl-10 border-2 rounded shadow-inner focus:outline-none transition-colors
+                        className={`w-full text-lg font-mono p-3 pl-9 border rounded shadow-inner focus:outline-none transition-colors
                           ${errorModal.isOpen 
                             ? 'bg-gray-100 cursor-not-allowed border-gray-300' 
                             : defectCode 
-                              ? 'bg-amber-50 border-amber-500 ring-4 ring-amber-100'
-                              : 'bg-white border-blue-600 ring-4 ring-blue-50/50'}
+                              ? 'bg-amber-50 border-amber-500 ring-2 ring-amber-100'
+                              : 'bg-white border-blue-600 ring-2 ring-blue-50/50'}
                         `}
                         placeholder={
                           !modelName ? "⚠️ Nhập Tên Model trước" :
-                          !currentModel ? "⚠️ Nhập Mã Kiểm Tra (IMEI)" :
+                          (!currentModel) ? "⚠️ Nhập Mã Kiểm Tra (IMEI)" :
                           !currentEmployeeId ? "⚠️ Quét nhân viên trước" :
                           defectCode ? "⚠️ SẮP GHI LỖI NG..." :
                           "Sẵn sàng scan IMEI..."
@@ -829,7 +845,7 @@ export default function App() {
                         onChange={e => setProductInput(e.target.value)}
                         onKeyDown={handleProductScan}
                       />
-                      <Box className={`absolute left-3 top-1/2 -translate-y-1/2 ${currentEmployeeId && currentModel && modelName ? (defectCode ? 'text-amber-600' : 'text-blue-600') : 'text-gray-400'}`} size={24} />
+                      <Box className={`absolute left-2.5 top-1/2 -translate-y-1/2 ${currentEmployeeId && currentModel && modelName ? (defectCode ? 'text-amber-600' : 'text-blue-600') : 'text-gray-400'}`} size={20} />
                     </div>
                   </div>
                </div>
@@ -837,44 +853,40 @@ export default function App() {
           </div>
 
           {/* RIGHT: HISTORY TABLE */}
-          <div className="lg:col-span-2 h-[calc(100vh-220px)] min-h-[500px]">
+          <div className="lg:col-span-2 h-[calc(100vh-200px)] min-h-[500px]">
             <div className="bg-white rounded-lg shadow-sm border border-gray-200 h-full flex flex-col">
-               <div className="p-4 border-b border-gray-200 bg-gray-50 flex justify-between items-center rounded-t-lg">
-                  <h3 className="font-bold text-gray-700">Lịch sử Scan</h3>
-                  <div className="text-xs flex gap-2">
-                    <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-green-500"></div> OK</span>
-                    <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-amber-500"></div> NG</span>
-                    <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-red-500"></div> Err</span>
+               <div className="p-3 border-b border-gray-200 bg-gray-50 flex justify-between items-center rounded-t-lg">
+                  <h3 className="font-bold text-gray-700 text-sm">Lịch sử Scan</h3>
+                  <div className="text-xs flex gap-3 font-medium">
+                    <span className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-green-500"></div> OK</span>
+                    <span className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-amber-500"></div> NG</span>
+                    <span className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-red-500"></div> Err</span>
                   </div>
                </div>
                
                <div className="flex-1 overflow-auto">
                  <table className="w-full text-left text-sm">
-                   <thead className="bg-gray-100 text-gray-600 sticky top-0 z-0 shadow-sm">
+                   <thead className="bg-gray-100 text-gray-600 sticky top-0 z-10 shadow-sm border-b border-gray-200">
                      <tr>
-                       <th className="p-3 font-semibold border-b w-12">STT</th>
-                       <th className="p-3 font-semibold border-b">Mã IMEI máy</th>
-                       <th className="p-3 font-semibold border-b text-blue-700">Tên Model</th>
-                       <th className="p-3 font-semibold border-b">Công Đoạn</th>
-                       <th className="p-3 font-semibold border-b">Kết quả đo</th>
-                       <th className="p-3 font-semibold border-b">Tiến độ</th>
-                       <th className="p-3 font-semibold border-b">Nhân Viên</th>
-                       <th className="p-3 font-semibold border-b">Trạng Thái</th>
+                       <th className="p-3 font-semibold w-12 text-center">STT</th>
+                       <th className="p-3 font-semibold">Mã IMEI máy</th>
+                       <th className="p-3 font-semibold text-blue-700">Tên Model</th>
+                       <th className="p-3 font-semibold">Kết quả đo</th>
+                       <th className="p-3 font-semibold">Nhân Viên</th>
+                       <th className="p-3 font-semibold">Trạng Thái</th>
                      </tr>
                    </thead>
                    <tbody className="divide-y divide-gray-100">
                      {history.length === 0 ? (
-                       <tr><td colSpan={8} className="p-10 text-center text-gray-400">Chưa có dữ liệu</td></tr>
+                       <tr><td colSpan={6} className="p-10 text-center text-gray-400 italic">Chưa có dữ liệu</td></tr>
                      ) : (
                        history.map((row) => {
-                         const rowProgress = productProgress[row.productCode] || 0;
                          const rowStageObj = stages.find(s => s.id === row.stage);
-                         const rowStageName = rowStageObj?.name || `Stage ${row.stage}`;
                          
                          let rowClass = "";
-                         if (row.status === 'valid') rowClass = "border-green-500 hover:bg-gray-50";
-                         else if (row.status === 'defect') rowClass = "border-amber-500 bg-amber-50 hover:bg-amber-100";
-                         else rowClass = "border-red-500 bg-red-50 hover:bg-red-100";
+                         if (row.status === 'valid') rowClass = "border-l-4 border-l-green-500 hover:bg-gray-50";
+                         else if (row.status === 'defect') rowClass = "border-l-4 border-l-amber-500 bg-amber-50 hover:bg-amber-100";
+                         else rowClass = "border-l-4 border-l-red-500 bg-red-50 hover:bg-red-100";
                          
                          // Helper to render extended values cleanly
                          const renderExtended = () => {
@@ -896,8 +908,8 @@ export default function App() {
                          };
 
                          return (
-                           <tr key={row.id} className={`border-l-4 ${rowClass}`}>
-                             <td className="p-3 text-gray-500">{row.stt}</td>
+                           <tr key={row.id} className={rowClass}>
+                             <td className="p-3 text-gray-500 text-center">{row.stt}</td>
                              <td className={`p-3 font-mono font-medium ${row.status === 'error' ? 'text-red-700 line-through' : row.status === 'defect' ? 'text-amber-800' : 'text-blue-700'}`}>
                                {row.productCode}
                              </td>
@@ -905,27 +917,14 @@ export default function App() {
                                {row.modelName || <span className="text-gray-300">-</span>}
                              </td>
                              <td className="p-3">
-                               <span className="bg-gray-100 px-2 py-1 rounded text-xs font-bold border border-gray-200 block truncate max-w-[150px]" title={rowStageName}>
-                                 {rowStageName}
-                               </span>
-                             </td>
-                             <td className="p-3">
                                 <div className="font-medium text-purple-700">{row.measurement || '-'}</div>
                                 {renderExtended()}
-                             </td>
-                             <td className="p-3">
-                               {(row.status === 'valid' || row.status === 'defect') && (
-                                 <div className="flex gap-1">
-                                    {[1,2,3,4,5].map(step => (
-                                      <div key={step} className={`w-2 h-4 rounded-sm ${step <= rowProgress ? 'bg-green-500' : 'bg-gray-200'}`} title={`Step ${step}`}/>
-                                    ))}
-                                 </div>
-                               )}
                              </td>
                              <td className="p-3 text-gray-900">{row.employeeId}</td>
                              <td className="p-3">
                                {row.status === 'valid' ? (
-                                 <div className="text-xs text-gray-500">
+                                 <div className="text-xs text-gray-500 flex items-center gap-1">
+                                   <CheckCircle size={12} className="text-green-500"/>
                                    {format(new Date(row.timestamp), 'HH:mm:ss')}
                                  </div>
                                ) : row.status === 'defect' ? (

@@ -1,3 +1,12 @@
+export interface ValidationRule {
+  id: string;
+  name: string; // Tên gợi nhớ (VD: List Model A, Check độ dài)
+  type: 'contains' | 'not_contains' | 'starts_with' | 'length_eq';
+  value: string; // Giá trị để so sánh (List phân cách bởi khoảng trắng/phẩy, hoặc số)
+  isActive: boolean; // Trạng thái bật tắt
+  errorMessage: string; // Câu báo lỗi riêng
+}
+
 export interface ScanRecord {
   id: string;
   stt: number;
@@ -33,15 +42,23 @@ export interface Stage {
   measurementStandard?: string; // New: Standard value to compare against (e.g. "PASS", "OK")
   additionalFieldLabels?: string[]; // Labels for 8 custom fields. Empty string = disabled.
   additionalFieldDefaults?: string[]; // New: Default values for the 8 fields.
+  additionalFieldValidationLists?: string[]; // New: Whitelists for the 8 fields (string data).
+  validationRules?: ValidationRule[]; // New: List of flexible validation rules
 }
 
 // Helper to create empty arrays of size 8
 const EMPTY_8 = Array(8).fill("");
 
 export const DEFAULT_PROCESS_STAGES: Stage[] = [
-  { id: 1, name: "Công đoạn 1: SMT / Lắp ráp", enableMeasurement: false, measurementLabel: "", additionalFieldLabels: [...EMPTY_8], additionalFieldDefaults: [...EMPTY_8] },
-  { id: 2, name: "Công đoạn 2: Kiểm tra ngoại quan", enableMeasurement: false, measurementLabel: "", additionalFieldLabels: [...EMPTY_8], additionalFieldDefaults: [...EMPTY_8] },
-  { id: 3, name: "Công đoạn 3: Function Test", enableMeasurement: true, measurementLabel: "Kết quả Test", measurementStandard: "PASS", additionalFieldLabels: [...EMPTY_8], additionalFieldDefaults: [...EMPTY_8] },
-  { id: 4, name: "Công đoạn 4: Đóng gói", enableMeasurement: false, measurementLabel: "", additionalFieldLabels: [...EMPTY_8], additionalFieldDefaults: [...EMPTY_8] },
-  { id: 5, name: "Công đoạn 5: OBA / Xuất xưởng", enableMeasurement: false, measurementLabel: "", additionalFieldLabels: [...EMPTY_8], additionalFieldDefaults: [...EMPTY_8] },
+  { 
+    id: 1, 
+    name: "Kiểm tra sản phẩm", 
+    enableMeasurement: true, 
+    measurementLabel: "Kết quả Test", 
+    measurementStandard: "OK", 
+    additionalFieldLabels: [...EMPTY_8], 
+    additionalFieldDefaults: [...EMPTY_8],
+    additionalFieldValidationLists: [...EMPTY_8],
+    validationRules: []
+  }
 ];

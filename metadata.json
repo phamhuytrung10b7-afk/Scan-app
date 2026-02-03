@@ -1,5 +1,5 @@
 {
-  "name": "ProScan Manufacturing Tracker",
-  "description": "Industrial barcode scanning application for manufacturing lines with employee tracking, model validation, and duplicate prevention.",
+  "name": "App Scan con 2222",
+  "description": "A robust barcode scanning utility for manufacturing environments with model validation, duplicate checking, and CSV export.",
   "requestFramePermissions": []
 }
