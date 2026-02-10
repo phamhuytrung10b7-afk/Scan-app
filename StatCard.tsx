@@ -1,3 +1,4 @@
+
 import React from 'react';
 
 interface StatCardProps {
@@ -23,12 +24,12 @@ export const StatCard: React.FC<StatCardProps> = ({ title, value, type, icon }) 
   };
 
   return (
-    <div className={`p-4 rounded-lg border-2 shadow-sm flex flex-col items-center justify-center h-28 relative overflow-hidden ${styles[type]}`}>
-      <div className="flex justify-between items-center w-full absolute top-3 px-3">
-        <h3 className={`text-xs font-bold uppercase tracking-wider ${titleColors[type]}`}>{title}</h3>
-        {icon && <div className="opacity-80 scale-75">{icon}</div>}
+    <div className={`p-4 rounded-lg border-2 shadow-sm flex flex-col items-center justify-center h-32 relative overflow-hidden ${styles[type]}`}>
+      <div className="flex justify-between items-center w-full absolute top-3 px-4">
+        <h3 className={`text-sm font-bold uppercase tracking-wider ${titleColors[type]}`}>{title}</h3>
+        {icon && <div className="opacity-80 scale-90">{icon}</div>}
       </div>
-      <div className="text-4xl font-bold mt-2">
+      <div className="text-5xl font-bold mt-4 tracking-wide">
         {value}
       </div>
     </div>

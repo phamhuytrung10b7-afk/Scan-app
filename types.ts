@@ -1,3 +1,4 @@
+
 export interface ValidationRule {
   id: string;
   name: string; // Tên gợi nhớ (VD: List Model A, Check độ dài)
@@ -33,6 +34,12 @@ export interface ErrorState {
   message: string;
 }
 
+export interface StatusLabels {
+  valid: string;
+  defect: string;
+  error: string;
+}
+
 export interface Stage {
   id: number;
   name: string;
@@ -43,7 +50,10 @@ export interface Stage {
   additionalFieldLabels?: string[]; // Labels for 8 custom fields. Empty string = disabled.
   additionalFieldDefaults?: string[]; // New: Default values for the 8 fields.
   additionalFieldValidationLists?: string[]; // New: Whitelists for the 8 fields (string data).
+  additionalFieldMins?: string[]; // New: Min values for range check
+  additionalFieldMaxs?: string[]; // New: Max values for range check
   validationRules?: ValidationRule[]; // New: List of flexible validation rules
+  statusLabels?: StatusLabels; // New: Custom labels for OK, NG, Error
 }
 
 // Helper to create empty arrays of size 8
@@ -52,13 +62,40 @@ const EMPTY_8 = Array(8).fill("");
 export const DEFAULT_PROCESS_STAGES: Stage[] = [
   { 
     id: 1, 
-    name: "Kiểm tra sản phẩm", 
-    enableMeasurement: true, 
-    measurementLabel: "Kết quả Test", 
-    measurementStandard: "OK", 
-    additionalFieldLabels: [...EMPTY_8], 
+    name: "1. Nhập máy lỗi (Input)", 
+    enableMeasurement: false, 
+    measurementLabel: "", 
+    measurementStandard: "", 
+    // Field 1 used for initial defect description
+    additionalFieldLabels: ["Lỗi sơ bộ/Khách báo", "", "", "", "", "", "", ""], 
     additionalFieldDefaults: [...EMPTY_8],
     additionalFieldValidationLists: [...EMPTY_8],
-    validationRules: []
+    additionalFieldMins: [...EMPTY_8],
+    additionalFieldMaxs: [...EMPTY_8],
+    validationRules: [],
+    statusLabels: {
+      valid: "OK/ĐÃ SỬA",
+      defect: "NG/TRẢ LẠI",
+      error: "LỖI HỆ THỐNG"
+    }
+  },
+  { 
+    id: 2, 
+    name: "2. Xuất sau sửa (Output)", 
+    enableMeasurement: true, 
+    measurementLabel: "Kết quả Sửa", 
+    measurementStandard: "OK", 
+    // Fields configured for detailed defect tracking (up to 3 errors)
+    additionalFieldLabels: ["Nguyên nhân Lỗi 1", "Nguyên nhân Lỗi 2", "Nguyên nhân Lỗi 3", "Linh kiện thay thế", "", "", "", ""], 
+    additionalFieldDefaults: ["", "", "", "", "", "", "", ""],
+    additionalFieldValidationLists: [...EMPTY_8],
+    additionalFieldMins: [...EMPTY_8],
+    additionalFieldMaxs: [...EMPTY_8],
+    validationRules: [],
+    statusLabels: {
+      valid: "ĐẠT CHUẨN",
+      defect: "LỖI LẠI",
+      error: "SAI QUY TRÌNH"
+    }
   }
 ];

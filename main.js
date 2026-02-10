@@ -3,21 +3,16 @@ const path = require('path');
 
 function createWindow() {
   const win = new BrowserWindow({
-    width: 1200,
+    width: 1280,
     height: 800,
     webPreferences: {
       nodeIntegration: true,
-      contextIsolation: false, // Quan trọng để React có thể chạy script
+      contextIsolation: false, // Cho phép React chạy mượt mà
     }
   });
 
-  // Sử dụng path.resolve để đảm bảo đường dẫn tuyệt đối chính xác
-  const indexPath = path.resolve(__dirname, 'dist', 'index.html');
-  
-  win.loadFile(indexPath).catch(e => console.error("Lỗi nạp file:", e));
-
-  // Tự động mở DevTools khi chạy để bạn thấy lỗi ngay lập tức
-  // win.webContents.openDevTools(); 
+  // Nạp file index.html từ thư mục dist
+  win.loadFile(path.join(__dirname, 'dist', 'index.html'));
 }
 
 app.whenReady().then(createWindow);

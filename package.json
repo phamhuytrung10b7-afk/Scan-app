@@ -6,23 +6,24 @@
     "build": "vite build",
     "dist": "npm run build && electron-builder"
   },
+  "dependencies": {
+    "date-fns": "^4.1.0",
+    "lucide-react": "^0.562.0",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "xlsx": "0.18.5"
+  },
   "devDependencies": {
     "electron": "^40.1.0",
-    "electron-builder": "^26.7.0",
-    "vite": "^6.2.0"
+    "electron-builder": "^26.4.0",
+    "vite": "^6.2.0",
+    "@vitejs/plugin-react": "^5.0.0"
   },
   "build": {
     "appId": "com.proscan.tracker",
     "productName": "Proscan Tracker",
-    "directories": {
-      "output": "dist_electron"
-    },
-    "win": {
-      "target": "portable"
-    },
-    "files": [
-      "dist/**/*",
-      "main.js"
-    ]
+    "directories": { "output": "dist_electron" },
+    "win": { "target": "portable" },
+    "files": ["dist/**/*", "main.js"]
   }
 }
