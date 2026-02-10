@@ -1,4 +1,3 @@
-
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -23,9 +22,13 @@ const DATA_FILE = path.join(__dirname, 'manufacturing_data.json');
 let appState = {
   history: [],
   stages: [
-    { id: 1, name: "Kiểm tra sản phẩm", enableMeasurement: true, measurementLabel: "Kết quả Test" },
+    { id: 1, name: "Công đoạn 1: SMT / Lắp ráp", enableMeasurement: false, measurementLabel: "" },
+    { id: 2, name: "Công đoạn 2: Kiểm tra ngoại quan", enableMeasurement: false, measurementLabel: "" },
+    { id: 3, name: "Công đoạn 3: Function Test", enableMeasurement: true, measurementLabel: "Kết quả Test" },
+    { id: 4, name: "Công đoạn 4: Đóng gói", enableMeasurement: false, measurementLabel: "" },
+    { id: 5, name: "Công đoạn 5: OBA / Xuất xưởng", enableMeasurement: false, measurementLabel: "" },
   ],
-  stageEmployees: {}, // { 1: "NV001" }
+  stageEmployees: {}, // { 1: "NV001", 2: "NV002" }
 };
 
 // --- Load Data from Disk ---

@@ -1,39 +1,35 @@
-
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Download, ScanLine, Users, CheckCircle, RefreshCw, Box, Settings, Layers, Edit, XCircle, Activity, List, Tag, Maximize, Minimize, AlertCircle, ChevronRight, PenTool, AlertTriangle, Clock, Plus } from 'lucide-react';
+import { Download, ScanLine, Users, CheckCircle, AlertOctagon, RefreshCw, Box, Settings, AlertTriangle, Layers, Edit, XCircle, Activity, List, Tag, Upload, Maximize, Minimize } from 'lucide-react';
 import { format } from 'date-fns';
-import { utils, writeFile } from 'xlsx';
+import { read, utils } from 'xlsx';
 
-import { ScanRecord, ErrorState, DEFAULT_PROCESS_STAGES, Stage } from './types';
+import { ScanRecord, Stats, ErrorState, DEFAULT_PROCESS_STAGES, Stage } from './types';
 import { Button } from './Button';
 import { ErrorModal } from './ErrorModal';
 import { StatCard } from './StatCard';
 import { StageSettingsModal } from './StageSettingsModal';
 
 export default function App() {
-  // --- STATE WITH ROBUST PERSISTENCE ---
+  // --- STATE ---
   
-  // 1. Configuration (Stages) - Never lost on simple reset
+  // Configuration
+  const [stageEmployees, setStageEmployees] = useState<Record<number, string>>({});
+  const [currentModel, setCurrentModel] = useState<string>(''); // Used for IMEI Validation (Space separated list)
+  const [modelName, setModelName] = useState<string>(''); // New: Actual Model Name
+  
+  // Dynamic Stages with LocalStorage Persistence
   const [stages, setStages] = useState<Stage[]>(() => {
     try {
       const saved = localStorage.getItem('proscan_stages');
       if (saved) {
+        // Migration support for old data
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-            if (parsed.length === 1) {
-                return [parsed[0], DEFAULT_PROCESS_STAGES[1]];
-            }
-            return parsed.map((s: any) => ({
-              ...s,
-              additionalFieldLabels: s.additionalFieldLabels ? [...s.additionalFieldLabels, ...Array(8).fill("")].slice(0, 8) : Array(8).fill(""),
-              additionalFieldDefaults: s.additionalFieldDefaults ? [...s.additionalFieldDefaults, ...Array(8).fill("")].slice(0, 8) : Array(8).fill(""),
-              additionalFieldValidationLists: s.additionalFieldValidationLists ? [...s.additionalFieldValidationLists, ...Array(8).fill("")].slice(0, 8) : Array(8).fill(""),
-              additionalFieldMins: s.additionalFieldMins ? [...s.additionalFieldMins, ...Array(8).fill("")].slice(0, 8) : Array(8).fill(""),
-              additionalFieldMaxs: s.additionalFieldMaxs ? [...s.additionalFieldMaxs, ...Array(8).fill("")].slice(0, 8) : Array(8).fill(""),
-              validationRules: s.validationRules || [],
-              statusLabels: s.statusLabels || { valid: "OK/ĐÃ SỬA", defect: "NG/TRẢ LẠI", error: "LỖI HỆ THỐNG" }
-            }));
-        }
+        return parsed.map((s: any) => ({
+          ...s,
+          // Update default array size from potential old/new sizes to 8
+          additionalFieldLabels: s.additionalFieldLabels ? [...s.additionalFieldLabels, ...Array(8).fill("")].slice(0, 8) : Array(8).fill(""),
+          additionalFieldDefaults: s.additionalFieldDefaults ? [...s.additionalFieldDefaults, ...Array(8).fill("")].slice(0, 8) : Array(8).fill("")
+        }));
       }
     } catch (e) {
       console.error("Failed to load stages from storage", e);
@@ -41,91 +37,64 @@ export default function App() {
     return DEFAULT_PROCESS_STAGES;
   });
 
-  // 2. Employees - Persist per session/reset
-  const [stageEmployees, setStageEmployees] = useState<Record<number, string>>(() => {
-    try {
-      const saved = localStorage.getItem('proscan_employees');
-      return saved ? JSON.parse(saved) : {};
-    } catch (e) { return {}; }
-  });
-
-  // 3. Model Info & List
-  const [availableModels, setAvailableModels] = useState<string[]>(() => {
-    try {
-      const saved = localStorage.getItem('proscan_available_models');
-      return saved ? JSON.parse(saved) : ["IPHONE 13", "IPHONE 14", "SAMSUNG S23"];
-    } catch (e) { return ["IPHONE 13", "IPHONE 14", "SAMSUNG S23"]; }
-  });
-
-  const [modelName, setModelName] = useState<string>(() => {
-    return localStorage.getItem('proscan_model_name') || '';
-  });
-  
-  // 4. App State
+  // Ensure currentStage is valid initially (fallback to first available stage)
   const [currentStage, setCurrentStage] = useState<number>(() => {
-    const saved = localStorage.getItem('proscan_active_stage');
-    return saved ? parseInt(saved) : 1;
+    return stages.length > 0 ? stages[0].id : 1;
   });
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
-  // 5. DATA (History & Progress)
-  const [history, setHistory] = useState<ScanRecord[]>(() => {
-    try {
-      const saved = localStorage.getItem('proscan_history');
-      return saved ? JSON.parse(saved) : [];
-    } catch (e) { return []; }
-  });
-
-  const [productProgress, setProductProgress] = useState<Record<string, number>>(() => {
-    try {
-      const saved = localStorage.getItem('proscan_progress');
-      return saved ? JSON.parse(saved) : {};
-    } catch (e) { return {}; }
-  });
-
-  const [productStatus, setProductStatus] = useState<Record<string, 'valid' | 'defect'>>(() => {
-    try {
-      const saved = localStorage.getItem('proscan_status');
-      return saved ? JSON.parse(saved) : {};
-    } catch (e) { return {}; }
-  });
+  // Data
+  const [history, setHistory] = useState<ScanRecord[]>([]);
+  const [productProgress, setProductProgress] = useState<Record<string, number>>({});
+  const [productStatus, setProductStatus] = useState<Record<string, 'valid' | 'defect'>>({});
+  
+  // UI State
+  const [stats, setStats] = useState<Stats>({ success: 0, defect: 0, error: 0 });
   
   // Inputs
   const [employeeInput, setEmployeeInput] = useState('');
+  const [defectCode, setDefectCode] = useState(''); 
   const [measurementValue, setMeasurementValue] = useState(''); 
   const [productInput, setProductInput] = useState('');
+  
+  // New: State for 8 additional fields
   const [additionalValues, setAdditionalValues] = useState<string[]>(Array(8).fill(""));
+  
   const [errorModal, setErrorModal] = useState<ErrorState>({ isOpen: false, message: '' });
 
   // Refs
   const employeeInputRef = useRef<HTMLInputElement>(null);
+  const defectInputRef = useRef<HTMLInputElement>(null);
   const measurementInputRef = useRef<HTMLInputElement>(null);
   const productInputRef = useRef<HTMLInputElement>(null);
+  const modelInputRef = useRef<HTMLInputElement>(null);
+  const modelNameRef = useRef<HTMLInputElement>(null); // New Ref for Model Name
+  // Refs for 8 additional inputs
   const extraInputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
-  // Calculate stats for CURRENT stage
-  const validScanCount = history.filter(r => r.status === 'valid' && r.stage === currentStage).length;
-  const errorScanCount = history.filter(r => r.status === 'error' && r.stage === currentStage).length;
+  // --- EFFECT: Save Stages to LocalStorage ---
+  useEffect(() => {
+    localStorage.setItem('proscan_stages', JSON.stringify(stages));
+  }, [stages]);
 
-  // Calculate pending inventory for stages > 1
-  const pendingCount = useMemo(() => {
-    if (currentStage === 1) return 0;
-    return Object.values(productProgress).filter(p => p === (currentStage - 1)).length;
-  }, [productProgress, currentStage]);
+  // --- EFFECT: Calculate Stats for Current Stage ---
+  useEffect(() => {
+    const currentStageSuccess = history.filter(
+      r => r.status === 'valid' && r.stage === currentStage
+    ).length;
 
-  // --- IMMEDIATE PERSISTENCE EFFECTS (Save on Change) ---
-  useEffect(() => { localStorage.setItem('proscan_stages', JSON.stringify(stages)); }, [stages]);
-  useEffect(() => { localStorage.setItem('proscan_employees', JSON.stringify(stageEmployees)); }, [stageEmployees]);
-  useEffect(() => { localStorage.setItem('proscan_available_models', JSON.stringify(availableModels)); }, [availableModels]);
-  useEffect(() => { localStorage.setItem('proscan_model_name', modelName); }, [modelName]);
-  useEffect(() => { localStorage.setItem('proscan_active_stage', currentStage.toString()); }, [currentStage]);
-  
-  // Heavy data saving
-  useEffect(() => { localStorage.setItem('proscan_history', JSON.stringify(history)); }, [history]);
-  useEffect(() => { localStorage.setItem('proscan_progress', JSON.stringify(productProgress)); }, [productProgress]);
-  useEffect(() => { localStorage.setItem('proscan_status', JSON.stringify(productStatus)); }, [productStatus]);
+    const currentStageDefect = history.filter(
+      r => r.status === 'defect' && r.stage === currentStage
+    ).length;
+    
+    setStats(prev => ({ 
+      ...prev, 
+      success: currentStageSuccess,
+      defect: currentStageDefect
+    }));
+  }, [history, currentStage]);
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -136,16 +105,19 @@ export default function App() {
   }, []);
 
   // --- HELPER: Get Current Stage Object & Employee ---
-  const currentStageObj = useMemo(() => stages.find(s => s.id === currentStage) || stages[0], [stages, currentStage]);
+  const currentStageObj = useMemo(() => stages.find(s => s.id === currentStage), [stages, currentStage]);
   const currentEmployeeId = stageEmployees[currentStage];
   
+  // Determine active extra fields (those with labels)
   const activeExtraFields = useMemo(() => {
     if (!currentStageObj?.additionalFieldLabels) return [];
     return currentStageObj.additionalFieldLabels.map((label, idx) => ({ label, idx })).filter(f => f.label.trim() !== "");
   }, [currentStageObj]);
 
+  // Helper to load defaults for current stage
   const loadDefaults = useCallback(() => {
     if (currentStageObj?.additionalFieldDefaults) {
+      // Create a copy of defaults, ensuring empty strings for missing values
       const defaults = [...currentStageObj.additionalFieldDefaults];
       while(defaults.length < 8) defaults.push("");
       setAdditionalValues(defaults);
@@ -154,36 +126,72 @@ export default function App() {
     }
   }, [currentStageObj]);
 
+  // Apply defaults when stage changes
   useEffect(() => {
     loadDefaults();
   }, [currentStage, loadDefaults]);
 
   // --- INITIAL FOCUS ---
   useEffect(() => {
-    if (!currentEmployeeId) employeeInputRef.current?.focus();
+    if (!modelName) modelNameRef.current?.focus();
+    else if (!currentModel) modelInputRef.current?.focus();
+    else if (!currentEmployeeId) employeeInputRef.current?.focus();
     else {
+      // Logic for initial focus based on stage config
       if (currentStageObj?.enableMeasurement) measurementInputRef.current?.focus();
-      else if (activeExtraFields.length > 0) extraInputRefs.current[activeExtraFields[0].idx]?.focus();
       else productInputRef.current?.focus();
     }
-  }, [currentStage, currentEmployeeId]);
+  }, [currentStage]);
 
   // --- HANDLERS ---
+  
   const toggleFullScreen = () => {
     if (!document.fullscreenElement) {
-      document.documentElement.requestFullscreen().catch(err => console.error(err));
+      document.documentElement.requestFullscreen().catch(err => {
+        console.error(`Error attempting to enable full-screen mode: ${err.message}`);
+      });
     } else {
-      if (document.exitFullscreen) document.exitFullscreen();
+      if (document.exitFullscreen) {
+        document.exitFullscreen();
+      }
     }
   };
 
-  const handleModelSelect = (model: string) => {
-    setModelName(model);
-    // Auto focus employee input if not set, or product input if set
-    setTimeout(() => {
-        if (!currentEmployeeId) employeeInputRef.current?.focus();
-        else productInputRef.current?.focus();
-    }, 50);
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const data = await file.arrayBuffer();
+      const workbook = read(data);
+      const firstSheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[firstSheetName];
+      
+      // Get data as array of arrays to be safe about column structure
+      // Type 'any' used because sheet_to_json returns generic objects
+      const jsonData = utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
+      
+      // Extract 1st column, filter empties, join by space
+      const codes = jsonData
+          .map(row => row[0]) // Take first cell of each row
+          .filter(cell => cell !== undefined && cell !== null && String(cell).trim() !== '')
+          .map(cell => String(cell).trim().toUpperCase());
+
+      if (codes.length === 0) {
+        alert("File không có dữ liệu ở cột A!");
+        return;
+      }
+
+      const resultString = codes.join(' ');
+      setCurrentModel(resultString);
+      alert(`Đã tải thành công ${codes.length} mã kiểm tra!`);
+      
+      // Reset file input
+      e.target.value = '';
+    } catch (err) {
+      console.error(err);
+      alert("Lỗi đọc file Excel. Vui lòng kiểm tra lại định dạng.");
+    }
   };
 
   const handleEmployeeScan = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -192,26 +200,32 @@ export default function App() {
       if (val) {
         setStageEmployees(prev => ({ ...prev, [currentStage]: val }));
         setEmployeeInput('');
+        
+        // Smart Focus Next
         setTimeout(() => {
              if (currentStageObj?.enableMeasurement) measurementInputRef.current?.focus();
-             else if (activeExtraFields.length > 0) extraInputRefs.current[activeExtraFields[0].idx]?.focus();
              else productInputRef.current?.focus();
         }, 50);
       }
     }
   };
 
+  const handleDefectScan = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') productInputRef.current?.focus();
+  };
+
   const handleMeasurementScan = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
       if (measurementValue.trim()) {
+        // Logic: Find the first ACTIVE field that DOES NOT have a value (skips defaults)
         const nextField = activeExtraFields.find(f => !additionalValues[f.idx]);
+        
         if (nextField) {
            extraInputRefs.current[nextField.idx]?.focus();
         } else if (activeExtraFields.length > 0) {
            const hasManualFields = activeExtraFields.some(f => !currentStageObj?.additionalFieldDefaults?.[f.idx]);
-           if (hasManualFields) {
-                const first = activeExtraFields[0];
-                extraInputRefs.current[first.idx]?.focus();
+           if (!hasManualFields) {
+             productInputRef.current?.focus();
            } else {
              productInputRef.current?.focus();
            }
@@ -224,11 +238,19 @@ export default function App() {
 
   const handleExtraInputScan = (e: React.KeyboardEvent<HTMLInputElement>, index: number) => {
     if (e.key === 'Enter') {
+      // Find the next field in the ACTIVE list
       const currentActivePos = activeExtraFields.findIndex(f => f.idx === index);
       
       if (currentActivePos !== -1 && currentActivePos < activeExtraFields.length - 1) {
          let nextActivePos = currentActivePos + 1;
          let nextRealIdx = activeExtraFields[nextActivePos].idx;
+
+         // Try to find the next empty field
+         while (nextActivePos < activeExtraFields.length && additionalValues[activeExtraFields[nextActivePos].idx]) {
+            const isDefaulted = !!currentStageObj?.additionalFieldDefaults?.[activeExtraFields[nextActivePos].idx];
+            if (!isDefaulted) break; // Found a manual field
+            nextActivePos++;
+         }
 
          if (nextActivePos < activeExtraFields.length) {
             nextRealIdx = activeExtraFields[nextActivePos].idx;
@@ -236,7 +258,9 @@ export default function App() {
          } else {
             productInputRef.current?.focus();
          }
+
       } else {
+         // End of list
          productInputRef.current?.focus();
       }
     }
@@ -249,11 +273,13 @@ export default function App() {
   };
 
   const handleError = (message: string, scannedCode: string = '') => {
+    setStats(prev => ({ ...prev, error: prev.error + 1 }));
+    
     const errorRecord: ScanRecord = {
       id: crypto.randomUUID(),
       stt: history.length + 1,
       productCode: scannedCode || '---',
-      model: localStorage.getItem('proscan_current_model') || 'CHƯA CÓ',
+      model: currentModel || 'CHƯA CÓ',
       modelName: modelName || '',
       employeeId: currentEmployeeId || 'CHƯA CÓ',
       timestamp: new Date().toISOString(),
@@ -273,7 +299,7 @@ export default function App() {
       id: crypto.randomUUID(),
       stt: history.length + 1,
       productCode: code,
-      model: localStorage.getItem('proscan_current_model') || '',
+      model: currentModel,
       modelName: modelName,
       employeeId: currentEmployeeId || 'UNKNOWN',
       timestamp: new Date().toISOString(),
@@ -281,20 +307,53 @@ export default function App() {
       note: 'Thành công',
       stage: currentStage,
       measurement: currentStageObj?.enableMeasurement ? measurementValue : undefined,
-      additionalValues: [...additionalValues]
+      additionalValues: currentStageObj?.enableMeasurement ? [...additionalValues] : undefined
     };
 
     setHistory(prev => [newRecord, ...prev]);
     
-    // Clear inputs
+    // Reset Inputs
     setProductInput('');
+    setDefectCode('');
     setMeasurementValue(''); 
+    
+    // RESET TO DEFAULTS
     loadDefaults();
     
-    // Smart Focus Recovery
+    // Return Focus logic
     setTimeout(() => {
         if (currentStageObj?.enableMeasurement) measurementInputRef.current?.focus();
-        else if (activeExtraFields.length > 0) extraInputRefs.current[activeExtraFields[0].idx]?.focus();
+        else productInputRef.current?.focus();
+    }, 50);
+  };
+
+  const handleDefectRecord = (code: string, reason: string) => {
+    setProductStatus(prev => ({ ...prev, [code]: 'defect' }));
+
+    const newRecord: ScanRecord = {
+      id: crypto.randomUUID(),
+      stt: history.length + 1,
+      productCode: code,
+      model: currentModel,
+      modelName: modelName,
+      employeeId: currentEmployeeId || 'UNKNOWN',
+      timestamp: new Date().toISOString(),
+      status: 'defect',
+      note: `Lỗi: ${reason}`,
+      stage: currentStage,
+      measurement: currentStageObj?.enableMeasurement ? measurementValue : undefined,
+      additionalValues: currentStageObj?.enableMeasurement ? [...additionalValues] : undefined
+    };
+
+    setHistory(prev => [newRecord, ...prev]);
+    
+    setProductInput('');
+    setDefectCode(''); 
+    setMeasurementValue('');
+    loadDefaults();
+
+    setTimeout(() => {
+        if (currentStageObj?.enableMeasurement) measurementInputRef.current?.focus();
         else productInputRef.current?.focus();
     }, 50);
   };
@@ -305,17 +364,30 @@ export default function App() {
       const code = productInput.trim();
       if (!code) return;
 
-      // --- VALIDATIONS ---
-      if (!modelName.trim()) return handleError("Lỗi: Chưa chọn Tên Model (Click nút phía trên).", code);
-      if (!currentEmployeeId) return handleError(`Lỗi: Chưa xác định nhân viên cho công đoạn này.`, code);
+      // VALIDATIONS
+      // 0. Model Name Check (MANDATORY)
+      if (!modelName.trim()) return handleError("Lỗi: Chưa nhập Tên Model.", code);
 
-      // --- SEQUENCE CHECK ---
-      if (currentStage > 1) {
-         const previousStageDone = (productProgress[code] || 0) >= (currentStage - 1);
-         if (!previousStageDone) {
-             const prevStageName = stages.find(s => s.id === currentStage - 1)?.name || `Công đoạn ${currentStage - 1}`;
-             return handleError(`Lỗi quy trình: Mã này chưa hoàn thành "${prevStageName}".`, code);
-         }
+      // 1. Check if Validation List is Configured
+      if (!currentModel.trim()) return handleError("Lỗi: Chưa cài đặt Danh sách Mã chuẩn (Validation List).", code);
+      
+      // 2. Parse Valid Patterns (Split by whitespace)
+      // REGEX: /\s+/ matches one or more whitespace characters
+      const validPatterns = currentModel.trim().split(/\s+/).map(s => s.trim().toUpperCase()).filter(s => s.length > 0);
+      
+      // 3. Employee Check
+      if (!currentEmployeeId) return handleError(`Lỗi: Chưa xác định nhân viên cho công đoạn ${currentStage}.`, code);
+      
+      // 4. Validate Code against Patterns (Contains ANY)
+      const isMatch = validPatterns.some(pattern => code.toUpperCase().includes(pattern));
+      if (!isMatch) {
+         // Simplified Error Message as requested
+         return handleError(`Lỗi: Mã không nằm trong kế hoạch sản xuất.\nMã quét: ${code}`, code);
+      }
+
+      if (defectCode.trim()) {
+        handleDefectRecord(code, defectCode);
+        return;
       }
 
       // MEASUREMENT VALIDATION
@@ -326,69 +398,49 @@ export default function App() {
            return handleError(`Lỗi: Công đoạn này yêu cầu nhập ${currentStageObj.measurementLabel || 'giá trị đo'}.`, code);
         }
 
+        // CHECK AGAINST STANDARD
         const standard = currentStageObj.measurementStandard?.trim();
         if (standard) {
           const stdNum = parseFloat(standard.replace(',', '.'));
           const valNum = parseFloat(val.replace(',', '.'));
 
           if (!isNaN(stdNum)) {
-             if (isNaN(valNum)) return handleError(`Lỗi: Tiêu chuẩn là số (${standard}), vui lòng nhập kết quả là số.`, code);
-             if (valNum >= stdNum) return handleError(`LỖI NG: Kết quả đo quá cao!\nTiêu chuẩn (Max): < ${standard}\nThực tế: ${val}`, code);
+             if (isNaN(valNum)) {
+                return handleError(`Lỗi: Tiêu chuẩn là số (${standard}), vui lòng nhập kết quả là số.`, code);
+             }
+             if (valNum >= stdNum) {
+                return handleError(`LỖI NG: Kết quả đo quá cao!\nTiêu chuẩn (Max): < ${standard}\nThực tế: ${val}`, code);
+             }
           } else {
-             if (val.toUpperCase() !== standard.toUpperCase()) return handleError(`LỖI NG: Kết quả đo không đạt chuẩn!\nTiêu chuẩn: ${standard}\nThực tế: ${val}`, code);
+             if (val.toUpperCase() !== standard.toUpperCase()) {
+                return handleError(`LỖI NG: Kết quả đo không đạt chuẩn!\nTiêu chuẩn: ${standard}\nThực tế: ${val}`, code);
+             }
           }
         }
-      }
-      
-      // VALIDATE EXTRA FIELDS
-      for (const field of activeExtraFields) {
-           const fieldVal = additionalValues[field.idx].trim();
-           if (!fieldVal && field.idx === activeExtraFields[0].idx) {
+        
+        // Validate Additional Fields
+        for (const field of activeExtraFields) {
+           if (!additionalValues[field.idx].trim()) {
              extraInputRefs.current[field.idx]?.focus();
-             return handleError(`Lỗi: Chưa nhập thông tin cho "${field.label}".`, code);
+             return handleError(`Lỗi: Chưa nhập giá trị cho "${field.label}".`, code);
            }
-
-           if (fieldVal) {
-                const whitelistString = currentStageObj.additionalFieldValidationLists?.[field.idx];
-                if (whitelistString && whitelistString.trim()) {
-                    const allowedValues = whitelistString.trim().split(/\s+/).map(s => s.toUpperCase());
-                    if (allowedValues.length > 0 && !allowedValues.includes(fieldVal.toUpperCase())) {
-                        extraInputRefs.current[field.idx]?.focus();
-                        return handleError(`LỖI: Giá trị "${fieldVal}" không nằm trong danh sách cho phép của "${field.label}".`, code);
-                    }
-                }
-
-                const minStr = currentStageObj.additionalFieldMins?.[field.idx]?.trim();
-                const maxStr = currentStageObj.additionalFieldMaxs?.[field.idx]?.trim();
-
-                if (minStr || maxStr) {
-                    const valNum = parseFloat(fieldVal.replace(',', '.'));
-                    if (isNaN(valNum)) {
-                        extraInputRefs.current[field.idx]?.focus();
-                        return handleError(`LỖI: "${field.label}" yêu cầu giá trị số.`, code);
-                    }
-                    if (minStr) {
-                        const min = parseFloat(minStr.replace(',', '.'));
-                        if (!isNaN(min) && valNum < min) {
-                            extraInputRefs.current[field.idx]?.focus();
-                            return handleError(`LỖI NG: Giá trị "${fieldVal}" thấp hơn mức tối thiểu (${min}) của "${field.label}".`, code);
-                        }
-                    }
-                    if (maxStr) {
-                        const max = parseFloat(maxStr.replace(',', '.'));
-                        if (!isNaN(max) && valNum > max) {
-                            extraInputRefs.current[field.idx]?.focus();
-                            return handleError(`LỖI NG: Giá trị "${fieldVal}" cao hơn mức tối đa (${max}) của "${field.label}".`, code);
-                        }
-                    }
-                }
-           }
+        }
       }
 
-      // DUPLICATE CHECK
+      // LOGIC CHECKS
       const currentProgress = productProgress[code] || 0;
+      const lastStatus = productStatus[code];
+
+      if (lastStatus === 'defect') {
+        if (currentStage > currentProgress + 1) {
+           return handleError("⛔ CẢNH BÁO: Sản phẩm bị LỖI (NG) chưa được xử lý.", code);
+        }
+      }
       if (currentProgress >= currentStage) {
-        return handleError(`Lỗi: Mã này đã được quét thành công trước đó (Tại công đoạn này).`, code);
+        return handleError(`Lỗi: Mã đã PASS công đoạn ${currentStage} trước đó.`, code);
+      }
+      if (currentStage > 1 && currentProgress < currentStage - 1) {
+        return handleError(`Lỗi: Sai trình tự. Chưa hoàn thành công đoạn ${currentStage - 1}.`, code);
       }
 
       handleSuccess(code);
@@ -398,329 +450,276 @@ export default function App() {
   const handleCloseError = () => {
     setErrorModal({ isOpen: false, message: '' });
     setProductInput('');
+    
     setTimeout(() => {
-      if (!modelName.trim()) {
-          // If no model, don't focus anything yet, visually they should select model
-      }
+      // Smart Focus recovery
+      if (!modelName.trim()) modelNameRef.current?.focus();
+      else if (!currentModel.trim()) modelInputRef.current?.focus();
       else if (!currentEmployeeId) employeeInputRef.current?.focus();
       else if (currentStageObj?.enableMeasurement) {
          if (!measurementValue) measurementInputRef.current?.focus();
-         else productInputRef.current?.focus();
-      }
-      else if (activeExtraFields.length > 0) {
-         extraInputRefs.current[activeExtraFields[0].idx]?.focus();
+         else productInputRef.current?.focus(); // Simplified
       }
       else productInputRef.current?.focus();
     }, 50);
   };
 
-  const exportExcel = useCallback(() => {
-    const workbook = utils.book_new();
+  const exportCSV = useCallback(() => {
+    // 1. Calculate Dynamic Headers based on ALL stages configuration
+    // We create a definition map to know which column pulls from which data index
+    const dynamicColsDef: { header: string, stageId: number, valueIndex: number }[] = [];
 
-    // 1. MERGED DATA SHEET
-    // Get all valid history, sort by time DESC
-    const sortedHistory = [...history].sort((a, b) => 
-        new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-    );
-
-    // COLLECT DYNAMIC HEADERS STRICTLY BY STAGE ORDER
-    // (Stage 1 Fields -> Stage 2 Fields -> etc.)
-    const dynamicHeaderList: string[] = [];
-    
-    stages.forEach(s => {
-        // 1. Measurement (if enabled for this stage)
-        if (s.enableMeasurement && s.measurementLabel) {
-            const label = s.measurementLabel.trim();
-            if (label && !dynamicHeaderList.includes(label)) {
-                dynamicHeaderList.push(label);
-            }
+    stages.forEach(stage => {
+        // Only consider stages that have at least one label configured
+        if (stage.additionalFieldLabels?.some(l => l && l.trim())) {
+             stage.additionalFieldLabels.forEach((label, idx) => {
+                 if (label && label.trim()) {
+                     // Create a header like "S1: Voltage" or "Stage 1 - Voltage"
+                     // Using specific stage name prefix to avoid ambiguity
+                     dynamicColsDef.push({
+                         header: `${stage.name} - ${label}`,
+                         stageId: stage.id,
+                         valueIndex: idx
+                     });
+                 }
+             });
         }
-        
-        // 2. Additional Fields (in order 1-8 for this stage)
-        s.additionalFieldLabels?.forEach(l => {
-            if (l && l.trim()) {
-                const label = l.trim();
-                // Prevent duplicates (though users usually configure distinct fields per stage)
-                if (!dynamicHeaderList.includes(label)) {
-                    dynamicHeaderList.push(label);
-                }
-            }
-        });
     });
 
-    const mergedRows = sortedHistory.map((item, index) => {
-        const stageObj = stages.find(s => s.id === item.stage) || stages[0];
-        const labels = stageObj.statusLabels || { valid: "OK/ĐÃ SỬA", defect: "NG/TRẢ LẠI", error: "LỖI HỆ THỐNG" };
-        
-        let statusText = labels.error;
-        if (item.status === 'valid') statusText = labels.valid;
-        if (item.status === 'defect') statusText = labels.defect;
-
-        // Base Row
-        const row: any = {
-            "STT": index + 1,
-            "Thời Gian": format(new Date(item.timestamp), 'yyyy-MM-dd HH:mm:ss'),
-            "Công Đoạn": stageObj.name,
-            "Mã IMEI": item.productCode,
-            "Tên Model": item.modelName || '',
-        };
-
-        // Fill Dynamic Columns (Measurement & Extra Fields) based on the record's stage
-        dynamicHeaderList.forEach(header => {
-            let val = "";
-            
-            // Only fill data if this header actually belongs to the stage of this specific record
-            // OR if multiple stages share the same field name (e.g. "Notes"), fill it regardless.
-            // Priority: Check if the current record's stage configuration uses this header.
-            
-            if (stageObj) {
-                // 1. Check if this header matches the Measurement Label of the CURRENT record's stage
-                if (stageObj.enableMeasurement && stageObj.measurementLabel?.trim() === header) {
-                    val = item.measurement || "";
-                }
-                // 2. Check if this header matches any Additional Field Label of the CURRENT record's stage
-                else if (stageObj.additionalFieldLabels) {
-                    const fieldIndex = stageObj.additionalFieldLabels.findIndex(l => l?.trim() === header);
-                    if (fieldIndex !== -1) {
-                        val = item.additionalValues?.[fieldIndex] || "";
-                    }
-                }
-            }
-            
-            row[header] = val;
-        });
-
-        // End Columns
-        row["Nhân Viên"] = item.employeeId;
-        row["Trạng Thái"] = statusText;
-        row["Ghi Chú"] = item.note || '';
-
-        return row;
-    });
-
-    const worksheet = utils.json_to_sheet(mergedRows);
-
-    // Calculate column widths based on headers
-    const basicCols = [
-        { wch: 6 },  // STT
-        { wch: 20 }, // Time
-        { wch: 25 }, // Stage Name
-        { wch: 20 }, // IMEI
-        { wch: 15 }, // Model
+    // 2. Prepare full Header row
+    const headers = [
+        "STT", 
+        "Mã IMEI máy", 
+        "Tên Model", 
+        "Mã Kiểm Tra (IMEI)", 
+        "Công Đoạn", 
+        "Kết quả chính", 
+        ...dynamicColsDef.map(d => d.header), // The expanded dynamic columns
+        "Nhân Viên", 
+        "Thời Gian", 
+        "Trạng Thái", 
+        "Ghi Chú"
     ];
     
-    // Dynamic columns widths (auto-fit somewhat)
-    const dynamicCols = dynamicHeaderList.map(h => ({ wch: Math.max(h.length + 5, 15) }));
-    
-    const endCols = [
-        { wch: 15 }, // Employee
-        { wch: 15 }, // Status
-        { wch: 30 }  // Note
-    ];
+    // 3. Map Data Rows
+    const rows = history.map(item => {
+      const stageObj = stages.find(s => s.id === item.stage);
+      const stageName = stageObj?.name || `Công đoạn ${item.stage}`;
+      
+      let statusText = 'LỖI';
+      if (item.status === 'valid') statusText = 'OK';
+      if (item.status === 'defect') statusText = 'NG (Hàng Lỗi)';
+      
+      // Map the dynamic columns
+      const dynamicCells = dynamicColsDef.map(def => {
+          // Only fill data if the record belongs to the column's stage
+          if (item.stage === def.stageId) {
+              return item.additionalValues?.[def.valueIndex] || "-";
+          }
+          return ""; // Empty cell for irrelevant stages
+      });
 
-    worksheet['!cols'] = [...basicCols, ...dynamicCols, ...endCols];
-
-    utils.book_append_sheet(workbook, worksheet, "Dữ Liệu Chi Tiết");
-
-    // 2. Export Inventory Summary
-    const modelStats: Record<string, { input: Set<string>, output: Set<string> }> = {};
-
-    history.forEach(item => {
-        if (item.status !== 'valid') return;
-        const model = (item.modelName || "N/A").trim().toUpperCase();
-        
-        if (!modelStats[model]) {
-            modelStats[model] = { input: new Set(), output: new Set() };
-        }
-
-        if (item.stage === 1) {
-            modelStats[model].input.add(item.productCode);
-        } else if (item.stage === 2) {
-            modelStats[model].output.add(item.productCode);
-        }
+      return [
+        item.stt,
+        item.productCode,
+        item.modelName || '',
+        item.model,
+        stageName,
+        item.measurement || '-',
+        ...dynamicCells,
+        item.employeeId,
+        format(new Date(item.timestamp), 'yyyy-MM-dd HH:mm:ss'),
+        statusText,
+        item.note || ''
+      ];
     });
 
-    const summaryRows = Object.keys(modelStats).sort().map((model, idx) => {
-        const inputCount = modelStats[model].input.size;
-        const outputCount = modelStats[model].output.size;
-        return {
-            "STT": idx + 1,
-            "Tên Model": model,
-            "Tổng Nhập (Công đoạn 1)": inputCount,
-            "Tổng Xuất (Công đoạn 2)": outputCount,
-            "Tồn Kho (Chưa xuất)": inputCount - outputCount
-        };
-    });
-
-    const summaryWs = utils.json_to_sheet(summaryRows.length > 0 ? summaryRows : [{ "Thông báo": "Chưa có dữ liệu thống kê" }]);
-    const summaryCols = summaryRows.length > 0 ? Object.keys(summaryRows[0]).map(key => ({ wch: 22 })) : [{ wch: 30 }];
-    summaryWs['!cols'] = summaryCols;
-
-    utils.book_append_sheet(workbook, summaryWs, "Báo Cáo Tồn Kho");
-    
-    writeFile(workbook, `scan_process_data_${format(new Date(), 'yyyyMMdd_HHmmss')}.xls`);
+    const csvContent = [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+    const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", `scan_process_data_${format(new Date(), 'yyyyMMdd_HHmmss')}.csv`);
+    link.click();
   }, [history, stages]);
 
   const resetSession = () => {
-    if (confirm("CẢNH BÁO: Bạn có chắc muốn xóa lịch sử quét? \n\n(Cấu hình Công đoạn và Nhân viên sẽ được GIỮ NGUYÊN)")) {
+    if (confirm("CẢNH BÁO: Hành động này sẽ xóa toàn bộ lịch sử và tiến độ sản xuất hiện tại. Bạn có chắc không?")) {
       setHistory([]);
       setProductProgress({});
       setProductStatus({});
+      setStageEmployees({});
+      setStats({ success: 0, defect: 0, error: 0 });
       setProductInput('');
+      setDefectCode('');
       setMeasurementValue('');
-      
-      localStorage.setItem('proscan_history', JSON.stringify([]));
-      localStorage.setItem('proscan_progress', JSON.stringify({}));
-      localStorage.setItem('proscan_status', JSON.stringify({}));
-      
-      alert("Đã xóa dữ liệu ca làm việc mới!");
+      // Keep model settings? User might want to reset all.
+      // But typically setup params stay.
+      loadDefaults();
+      employeeInputRef.current?.focus();
     }
   };
 
+  const handleStageChange = (newStageId: number) => {
+    setCurrentStage(newStageId);
+    setMeasurementValue('');
+    
+    const newStage = stages.find(s => s.id === newStageId);
+    const empForNewStage = stageEmployees[newStageId];
+    
+    setTimeout(() => {
+        if (!empForNewStage) {
+            employeeInputRef.current?.focus();
+        } else if (newStage?.enableMeasurement) {
+            measurementInputRef.current?.focus();
+        } else {
+            productInputRef.current?.focus();
+        }
+    }, 50);
+  };
+
   return (
-    <div className="min-h-screen flex flex-col bg-gray-100 font-sans">
+    <div className="min-h-screen flex flex-col bg-gray-100">
       {/* Header */}
-      <header className="bg-slate-900 text-white p-3 shadow-lg sticky top-0 z-20">
-        <div className="w-full px-2 flex flex-col md:flex-row items-center justify-between gap-3">
+      <header className="bg-slate-900 text-white p-4 shadow-lg sticky top-0 z-20">
+        <div className="w-full px-4 flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="bg-blue-600 p-2 rounded-lg shadow-blue-500/50 shadow-lg">
-              <ScanLine size={32} />
+              <ScanLine size={28} />
             </div>
             <div>
-              <h1 className="text-2xl font-bold tracking-wide">Hệ Thống Quản Lý Sửa Chữa</h1>
-              <p className="text-slate-400 text-xs uppercase tracking-wider">Ver 4.9 (Dynamic Excel)</p>
+              <h1 className="text-2xl font-bold tracking-tight">ProScan Process Gate</h1>
+              <p className="text-slate-400 text-xs uppercase tracking-wider">Ver 3.6 (8 Params)</p>
             </div>
           </div>
           
-          <div className="flex flex-col md:flex-row items-center gap-2 w-full md:w-auto">
-             <div className="flex items-center gap-2">
-                <Button onClick={() => setIsSettingsOpen(true)} className="text-sm p-2.5 bg-slate-700 hover:bg-slate-600 border border-slate-600" title="Cấu hình công đoạn & Model">
-                  <Edit size={18} />
-                </Button>
-                
-                <Button onClick={toggleFullScreen} className="text-sm p-2.5 bg-slate-700 hover:bg-slate-600 border border-slate-600" title="Toàn màn hình">
-                    {isFullscreen ? <Minimize size={18} /> : <Maximize size={18} />}
-                </Button>
-
-                <Button onClick={exportExcel} variant="success" className="text-sm py-2 px-4">
-                  <Download size={18} className="mr-2 inline" /> Excel
-                </Button>
-                <Button onClick={resetSession} variant="secondary" className="text-sm py-2 px-4">
-                  <RefreshCw size={18} className="mr-2 inline" /> Reset
-                </Button>
+          <div className="flex flex-col md:flex-row items-center gap-3 w-full md:w-auto">
+             
+             {/* New: Actual Model Name */}
+             <div className="flex items-center bg-slate-800 rounded px-3 py-1 border border-slate-700">
+                 <Tag size={16} className="text-slate-400 mr-2" />
+                 <input
+                    ref={modelNameRef}
+                    type="text"
+                    className="bg-transparent text-white border-none focus:ring-0 text-sm font-bold py-1 w-32 placeholder-slate-500 uppercase"
+                    placeholder="NHẬP TÊN MODEL"
+                    value={modelName}
+                    onChange={(e) => setModelName(e.target.value)}
+                  />
              </div>
+
+             {/* Existing: Model/IMEI Validation with Upload */}
+             <div className="flex items-center bg-slate-800 rounded px-3 py-1 border border-slate-700">
+                 <Settings size={16} className="text-slate-400 mr-2" />
+                 <div className="flex items-center">
+                    <input
+                        ref={modelInputRef}
+                        type="text"
+                        className="bg-transparent text-white border-none focus:ring-0 text-sm font-bold py-1 w-32 placeholder-slate-500 uppercase"
+                        placeholder="MÃ KIỂM TRA (LIST)"
+                        title="Nhập danh sách mã hợp lệ (cách nhau bởi khoảng trắng) HOẶC upload file Excel"
+                        value={currentModel}
+                        onChange={(e) => setCurrentModel(e.target.value.toUpperCase())}
+                      />
+                      <label className="cursor-pointer hover:bg-slate-600 p-1 rounded transition-colors ml-1" title="Upload Excel (Cột A)">
+                        <Upload size={16} className="text-green-400" />
+                        <input 
+                          type="file" 
+                          className="hidden" 
+                          accept=".xlsx, .xls, .csv" 
+                          onChange={handleFileUpload}
+                        />
+                      </label>
+                 </div>
+             </div>
+             
+             <Button onClick={() => setIsSettingsOpen(true)} className="text-sm bg-slate-700 hover:bg-slate-600 border border-slate-600" title="Cấu hình công đoạn">
+               <Edit size={16} />
+             </Button>
+             
+             <Button onClick={toggleFullScreen} className="text-sm bg-slate-700 hover:bg-slate-600 border border-slate-600" title="Toàn màn hình">
+                {isFullscreen ? <Minimize size={16} /> : <Maximize size={16} />}
+             </Button>
+
+            <Button onClick={exportCSV} variant="success" className="text-sm">
+              <Download size={16} className="mr-1 inline" /> Excel
+            </Button>
+            <Button onClick={resetSession} variant="secondary" className="text-sm">
+              <RefreshCw size={16} className="mr-1 inline" /> Reset
+            </Button>
           </div>
         </div>
       </header>
 
+      {/* STAGE SELECTOR BAR */}
+      <div className="bg-white border-b border-gray-200 shadow-sm sticky top-[72px] z-10">
+        <div className="w-full px-2 p-2 overflow-x-auto">
+           <div className="flex space-x-2 min-w-max">
+             {stages.map((stage) => {
+               const hasEmp = !!stageEmployees[stage.id];
+               return (
+               <button
+                 key={stage.id}
+                 onClick={() => handleStageChange(stage.id)}
+                 className={`flex items-center px-4 py-3 rounded-lg border-2 transition-all duration-200 font-bold text-sm ${
+                   currentStage === stage.id
+                     ? 'bg-blue-600 border-blue-600 text-white shadow-md scale-105'
+                     : 'bg-gray-50 border-gray-200 text-gray-500 hover:bg-gray-100 hover:border-gray-300'
+                 }`}
+               >
+                 <span className={`flex items-center justify-center w-6 h-6 rounded-full mr-2 text-xs border ${
+                    currentStage === stage.id ? 'bg-white text-blue-600 border-white' : hasEmp ? 'bg-green-500 text-white border-green-500' : 'bg-gray-300 text-white border-gray-300'
+                 }`}>
+                   {stage.id}
+                 </span>
+                 {stage.name}
+               </button>
+             )})}
+           </div>
+        </div>
+      </div>
+
       {/* Main Content */}
       <main className="flex-1 p-4 md:p-6 w-full grid grid-cols-1 lg:grid-cols-3 gap-6">
           
-          {/* TOP: STAGE SELECTION TABS */}
-          <div className="col-span-1 lg:col-span-3">
-            <div className="flex space-x-4 bg-white p-3 rounded-xl shadow-sm overflow-x-auto border border-gray-200">
-              {stages.map((stage) => (
-                <button
-                  key={stage.id}
-                  onClick={() => setCurrentStage(stage.id)}
-                  className={`px-8 py-5 rounded-lg font-bold text-xl tracking-wide whitespace-nowrap transition-all flex items-center gap-4 ${
-                    currentStage === stage.id
-                      ? 'bg-blue-600 text-white shadow-lg scale-105'
-                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200 hover:text-gray-800 border border-transparent hover:border-gray-300'
-                  }`}
-                >
-                  <span className={`px-3 py-1 rounded text-base ${currentStage === stage.id ? 'bg-white/20' : 'bg-gray-300 text-gray-700'}`}>
-                    {stage.id}
-                  </span>
-                  {stage.name}
-                  {currentStage === stage.id && <ChevronRight size={24} className="animate-pulse" />}
-                </button>
-              ))}
-            </div>
-          </div>
-
           {/* LEFT: INPUTS & STATS */}
-          <div className="lg:col-span-1 space-y-4">
+          <div className="lg:col-span-1 space-y-6">
             
-            <div className="bg-blue-600 text-white p-5 rounded-lg shadow-md flex flex-col justify-center transition-all duration-300">
-                <h3 className="text-xs uppercase font-bold opacity-70 mb-1 tracking-wider">KHU VỰC LÀM VIỆC</h3>
-                <div className="text-xl font-bold flex items-center gap-2 truncate tracking-wide">
-                    <Layers size={24} /> <span className="truncate">{currentStageObj?.name || `Trạm kiểm tra`}</span>
-                </div>
-                {currentEmployeeId && (
-                    <div className="mt-2 text-sm bg-blue-700/50 p-1 px-3 rounded inline-block w-fit">
-                        NV: <b>{currentEmployeeId}</b>
+            {/* Stats */}
+            <div className="grid grid-cols-3 gap-4">
+               <div className="col-span-3">
+                 <div className="bg-blue-600 text-white p-4 rounded-lg shadow-md">
+                    <h3 className="text-xs uppercase font-bold opacity-80 mb-1">Công đoạn đang chọn</h3>
+                    <div className="text-xl font-bold flex items-center gap-2">
+                       <Layers size={24} /> {currentStageObj?.name || `Stage ${currentStage}`}
                     </div>
-                )}
-            </div>
-
-            <div className={`grid gap-3 ${currentStage > 1 ? 'grid-cols-2 md:grid-cols-3' : 'grid-cols-2'}`}>
-                {currentStage > 1 && (
-                  <StatCard 
-                    title="TỒN CHƯA XUẤT" 
-                    value={pendingCount} 
-                    type="warning" 
-                    icon={<Clock size={24} />} 
-                  />
-                )}
-                <StatCard 
-                  title={currentStageObj.statusLabels?.valid || "OK/ĐÃ SỬA"} 
-                  value={validScanCount} 
-                  type="success" 
-                  icon={<CheckCircle size={24} />} 
-                />
-                <StatCard 
-                  title={currentStageObj.statusLabels?.error || "LỖI HỆ THỐNG"} 
-                  value={errorScanCount} 
-                  type="neutral" 
-                  icon={<AlertCircle size={24} />} 
-                />
-            </div>
-
-            <div className="bg-white rounded-lg shadow-sm border border-gray-200">
-               <div className="p-4 bg-gray-50 border-b border-gray-200 font-bold text-gray-700 flex items-center gap-2 text-base uppercase tracking-wide">
-                 <ScanLine size={20} /> NHẬP LIỆU
-               </div>
-               <div className="p-5 space-y-6">
-                  
-                  {/* NEW: Model Selection Chips (Replaced Input) */}
-                  <div className="space-y-2">
-                    <label className="block text-sm font-bold text-blue-800 mb-1 flex items-center gap-2">
-                       <Tag size={16}/> CHỌN MODEL (BẮT BUỘC)
-                    </label>
-                    
-                    {availableModels.length === 0 ? (
-                        <div className="p-3 bg-yellow-50 text-yellow-700 text-sm border border-yellow-200 rounded">
-                           Chưa có model nào. Vui lòng vào <b>Cấu hình</b> để thêm.
-                        </div>
-                    ) : (
-                        <div className="flex flex-wrap gap-2 max-h-40 overflow-y-auto p-1">
-                            {availableModels.map((model, idx) => (
-                                <button
-                                    key={idx}
-                                    onClick={() => handleModelSelect(model)}
-                                    className={`px-4 py-2 rounded-full text-sm font-bold border transition-all shadow-sm ${
-                                        modelName === model 
-                                        ? 'bg-blue-600 text-white border-blue-600 ring-2 ring-blue-300 scale-105' 
-                                        : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100 hover:border-gray-400'
-                                    }`}
-                                >
-                                    {model}
-                                </button>
-                            ))}
-                        </div>
+                    {currentEmployeeId && (
+                       <div className="mt-2 text-sm bg-blue-700/50 p-1 px-2 rounded inline-block">
+                         NV: <b>{currentEmployeeId}</b>
+                       </div>
                     )}
-                  </div>
+                 </div>
+               </div>
+               <StatCard title="OK" value={stats.success} type="success" icon={<CheckCircle size={20} />} />
+               <StatCard title="NG" value={stats.defect} type="error" icon={<XCircle size={20} />} />
+               <StatCard title="System Err" value={stats.error} type="neutral" icon={<AlertOctagon size={20} />} />
+            </div>
 
-                  <hr className="border-gray-100"/>
-
+            {/* Scan Form */}
+            <div className="bg-white rounded-lg shadow-sm border border-gray-200">
+               <div className="p-4 bg-gray-50 border-b border-gray-200 font-bold text-gray-700 flex items-center gap-2">
+                 <ScanLine size={18} /> QUÉT MÃ
+               </div>
+               <div className="p-6 space-y-6">
                   {/* Employee */}
                   <div>
-                    <label className="block text-sm font-bold text-gray-600 mb-2">1. Nhân viên</label>
+                    <label className="block text-sm font-semibold text-gray-600 mb-1">
+                      1. Nhân viên (Công đoạn {currentStage})
+                    </label>
                     <div className="relative">
                       <input
                         ref={employeeInputRef}
-                        className={`w-full text-lg p-3 pl-10 border rounded focus:outline-none transition-colors tracking-wide ${currentEmployeeId ? 'border-green-300 bg-green-50 focus:border-green-500' : 'border-gray-300 focus:border-blue-500'}`}
+                        className={`w-full text-lg p-3 pl-10 border-2 rounded focus:outline-none ${currentEmployeeId ? 'border-green-300 bg-green-50 focus:border-green-500' : 'border-gray-300 focus:border-blue-500'}`}
                         placeholder={currentEmployeeId ? "Đổi nhân viên..." : "Scan mã NV để bắt đầu..."}
                         value={employeeInput}
                         onChange={e => setEmployeeInput(e.target.value)}
@@ -728,7 +727,7 @@ export default function App() {
                       />
                       <Users className="absolute left-3 top-3.5 text-gray-400" size={20} />
                       {currentEmployeeId && (
-                        <div className="absolute right-2 top-3 text-green-700 font-bold text-xs bg-green-200 px-2 py-1 rounded border border-green-300">
+                        <div className="absolute right-3 top-3.5 text-green-700 font-bold text-xs bg-green-200 px-2 py-0.5 rounded border border-green-300">
                           {currentEmployeeId}
                         </div>
                       )}
@@ -737,77 +736,100 @@ export default function App() {
                   
                   <hr className="border-gray-100"/>
 
-                  {/* Measurement Input */}
+                   {/* Defect Code Input */}
+                   <div className="bg-amber-50 p-3 rounded-md border border-amber-200">
+                    <label className="block text-sm font-bold text-amber-700 mb-1 flex items-center gap-2">
+                      <AlertTriangle size={14} />
+                      2. Mã Lỗi (Tùy chọn - Scan khi hàng NG)
+                    </label>
+                    <input
+                      ref={defectInputRef}
+                      className="w-full text-base p-2 border-2 border-amber-300 rounded focus:border-amber-500 focus:outline-none placeholder-amber-300/70"
+                      placeholder="Scan mã lỗi (Ví dụ: NG01)..."
+                      value={defectCode}
+                      onChange={e => setDefectCode(e.target.value)}
+                      onKeyDown={handleDefectScan}
+                    />
+                  </div>
+
+                  <hr className="border-gray-100"/>
+
+                  {/* Measurement Input (CONDITIONAL) */}
                   {currentStageObj?.enableMeasurement && (
-                    <div className="animate-in fade-in slide-in-from-top-2 duration-300 space-y-3">
+                    <div className="animate-in fade-in slide-in-from-top-2 duration-300 space-y-4">
+                      {/* Main Measurement */}
                       <div>
-                        <label className="block text-sm font-bold text-purple-700 mb-2 flex items-center gap-2">
+                        <label className="block text-sm font-bold text-purple-700 mb-1 flex items-center gap-2">
                           <Activity size={18} className="text-purple-600"/>
-                          2. {currentStageObj.measurementLabel || "Kết quả"} (Bắt buộc)
+                          3. Nhập {currentStageObj.measurementLabel || "Giá trị đo"} (Bắt buộc)
                         </label>
                         <input
                           ref={measurementInputRef}
-                          className="w-full text-lg p-3 border-2 border-purple-300 bg-purple-50 rounded focus:border-purple-500 focus:outline-none placeholder-purple-300 tracking-wide"
+                          className="w-full text-lg p-3 border-2 border-purple-300 bg-purple-50 rounded focus:border-purple-500 focus:outline-none"
                           placeholder={currentStageObj.measurementStandard ? `Nhập giá trị (Chuẩn: ${currentStageObj.measurementStandard})...` : `Nhập ${currentStageObj.measurementLabel || "giá trị"}...`}
                           value={measurementValue}
                           onChange={e => setMeasurementValue(e.target.value)}
                           onKeyDown={handleMeasurementScan}
                         />
                       </div>
-                    </div>
-                  )}
-                  
-                  {/* Extra Fields (Dynamic Error Inputs) */}
-                  {activeExtraFields.length > 0 && (
-                        <div className="bg-gray-50 p-4 rounded border border-gray-200 animate-in fade-in slide-in-from-top-2 duration-300">
-                           <label className="block text-sm font-bold text-gray-500 mb-3 uppercase flex items-center gap-2 tracking-wide">
-                             <List size={14}/> Thông tin chi tiết (Lỗi/Linh kiện)
+
+                      {/* 8 Extra Fields (Grid) */}
+                      {activeExtraFields.length > 0 && (
+                        <div className="bg-gray-50 p-3 rounded border border-gray-200">
+                           <label className="block text-xs font-bold text-gray-500 mb-2 uppercase flex items-center gap-1">
+                             <List size={12}/> Thông số mở rộng
                            </label>
-                           {/* Use grid-cols-1 on small screens, cols-2 on medium to accomodate longer error descriptions */}
-                           <div className="grid grid-cols-1 gap-4">
+                           {/* Updated Grid for 8 items: 2 cols */}
+                           <div className="grid grid-cols-2 gap-3">
                               {activeExtraFields.map((field) => (
                                 <div key={field.idx}>
-                                   <label className="block text-xs font-bold text-blue-800 mb-1.5 truncate flex items-center gap-1.5 tracking-wide" title={field.label}>
-                                      <PenTool size={12} /> {field.label}
+                                   <label className="block text-[10px] font-bold text-gray-500 mb-1 truncate" title={field.label}>
+                                      {field.label}
                                    </label>
                                    <input
-                                      ref={(el) => { extraInputRefs.current[field.idx] = el; }}
+                                      ref={(el) => extraInputRefs.current[field.idx] = el}
                                       value={additionalValues[field.idx]}
                                       onChange={(e) => updateAdditionalValue(field.idx, e.target.value)}
                                       onKeyDown={(e) => handleExtraInputScan(e, field.idx)}
-                                      className="w-full p-2.5 text-base border border-gray-300 rounded focus:border-blue-500 focus:ring-1 focus:ring-blue-200 outline-none bg-white shadow-sm tracking-wide"
-                                      placeholder={currentStageObj.additionalFieldDefaults?.[field.idx] ? `Mặc định: ${currentStageObj.additionalFieldDefaults?.[field.idx]}` : "Nhập thông tin..."}
+                                      className="w-full p-2 text-sm border border-gray-300 rounded focus:border-purple-500 focus:ring-1 focus:ring-purple-200 outline-none"
+                                      placeholder={currentStageObj.additionalFieldDefaults?.[field.idx] ? "(Mặc định)" : "..."}
                                    />
                                 </div>
                               ))}
                            </div>
                         </div>
+                      )}
+                    </div>
                   )}
 
                   {/* Product */}
                   <div>
-                    <label className="block text-sm font-bold text-gray-600 mb-2">
-                      {currentStageObj?.enableMeasurement || activeExtraFields.length > 0 ? "3" : "2"}. Mã IMEI máy (Enter để lưu)
+                    <label className="block text-sm font-semibold text-gray-600 mb-1">
+                      {currentStageObj?.enableMeasurement ? "4" : "3"}. Mã IMEI máy (Enter)
                     </label>
                     <div className="relative">
                       <input
                         ref={productInputRef}
                         disabled={errorModal.isOpen}
-                        className={`w-full text-2xl font-mono p-4 pl-12 border rounded shadow-inner focus:outline-none transition-colors tracking-wide
+                        className={`w-full text-xl font-mono p-4 pl-10 border-2 rounded shadow-inner focus:outline-none transition-colors
                           ${errorModal.isOpen 
                             ? 'bg-gray-100 cursor-not-allowed border-gray-300' 
-                            : 'bg-white border-blue-600 ring-4 ring-blue-50/50'}
+                            : defectCode 
+                              ? 'bg-amber-50 border-amber-500 ring-4 ring-amber-100'
+                              : 'bg-white border-blue-600 ring-4 ring-blue-50/50'}
                         `}
                         placeholder={
-                          !modelName ? "⚠️ Chọn MODEL trước" :
+                          !modelName ? "⚠️ Nhập Tên Model trước" :
+                          !currentModel ? "⚠️ Nhập Mã Kiểm Tra (IMEI)" :
                           !currentEmployeeId ? "⚠️ Quét nhân viên trước" :
+                          defectCode ? "⚠️ SẮP GHI LỖI NG..." :
                           "Sẵn sàng scan IMEI..."
                         }
                         value={productInput}
                         onChange={e => setProductInput(e.target.value)}
                         onKeyDown={handleProductScan}
                       />
-                      <Box className={`absolute left-3 top-1/2 -translate-y-1/2 ${currentEmployeeId && modelName ? 'text-blue-600' : 'text-gray-400'}`} size={28} />
+                      <Box className={`absolute left-3 top-1/2 -translate-y-1/2 ${currentEmployeeId && currentModel && modelName ? (defectCode ? 'text-amber-600' : 'text-blue-600') : 'text-gray-400'}`} size={24} />
                     </div>
                   </div>
                </div>
@@ -818,50 +840,54 @@ export default function App() {
           <div className="lg:col-span-2 h-[calc(100vh-220px)] min-h-[500px]">
             <div className="bg-white rounded-lg shadow-sm border border-gray-200 h-full flex flex-col">
                <div className="p-4 border-b border-gray-200 bg-gray-50 flex justify-between items-center rounded-t-lg">
-                  <h3 className="font-bold text-gray-700 text-base tracking-wide">Lịch sử Quét (Khu vực này)</h3>
-                  <div className="text-sm flex gap-4 font-medium">
-                    <span className="flex items-center gap-2"><div className="w-3 h-3 rounded-full bg-green-500"></div> OK</span>
-                    <span className="flex items-center gap-2"><div className="w-3 h-3 rounded-full bg-amber-500"></div> NG</span>
-                    <span className="flex items-center gap-2"><div className="w-3 h-3 rounded-full bg-red-500"></div> Err</span>
+                  <h3 className="font-bold text-gray-700">Lịch sử Scan</h3>
+                  <div className="text-xs flex gap-2">
+                    <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-green-500"></div> OK</span>
+                    <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-amber-500"></div> NG</span>
+                    <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-red-500"></div> Err</span>
                   </div>
                </div>
                
                <div className="flex-1 overflow-auto">
-                 <table className="w-full text-left text-base tracking-wide">
-                   <thead className="bg-gray-100 text-gray-600 sticky top-0 z-10 shadow-sm border-b border-gray-200">
+                 <table className="w-full text-left text-sm">
+                   <thead className="bg-gray-100 text-gray-600 sticky top-0 z-0 shadow-sm">
                      <tr>
-                       <th className="p-4 font-semibold w-16 text-center">STT</th>
-                       <th className="p-4 font-semibold">Công Đoạn</th>
-                       <th className="p-4 font-semibold">Mã IMEI máy</th>
-                       <th className="p-4 font-semibold text-blue-700">Tên Model</th>
-                       <th className="p-4 font-semibold">Chi tiết Sửa chữa / Lỗi</th>
-                       <th className="p-4 font-semibold">Nhân Viên</th>
-                       <th className="p-4 font-semibold">Trạng Thái</th>
+                       <th className="p-3 font-semibold border-b w-12">STT</th>
+                       <th className="p-3 font-semibold border-b">Mã IMEI máy</th>
+                       <th className="p-3 font-semibold border-b text-blue-700">Tên Model</th>
+                       <th className="p-3 font-semibold border-b">Công Đoạn</th>
+                       <th className="p-3 font-semibold border-b">Kết quả đo</th>
+                       <th className="p-3 font-semibold border-b">Tiến độ</th>
+                       <th className="p-3 font-semibold border-b">Nhân Viên</th>
+                       <th className="p-3 font-semibold border-b">Trạng Thái</th>
                      </tr>
                    </thead>
                    <tbody className="divide-y divide-gray-100">
                      {history.length === 0 ? (
-                       <tr><td colSpan={7} className="p-10 text-center text-gray-400 italic text-lg">Chưa có dữ liệu</td></tr>
+                       <tr><td colSpan={8} className="p-10 text-center text-gray-400">Chưa có dữ liệu</td></tr>
                      ) : (
                        history.map((row) => {
+                         const rowProgress = productProgress[row.productCode] || 0;
                          const rowStageObj = stages.find(s => s.id === row.stage);
-                         const labels = rowStageObj?.statusLabels || { valid: "OK", defect: "NG", error: "ERR" };
+                         const rowStageName = rowStageObj?.name || `Stage ${row.stage}`;
                          
                          let rowClass = "";
-                         if (row.status === 'valid') rowClass = "border-l-4 border-l-green-500 hover:bg-gray-50";
-                         else if (row.status === 'defect') rowClass = "border-l-4 border-l-amber-500 bg-amber-50 hover:bg-amber-100";
-                         else rowClass = "border-l-4 border-l-red-500 bg-red-50 hover:bg-red-100";
+                         if (row.status === 'valid') rowClass = "border-green-500 hover:bg-gray-50";
+                         else if (row.status === 'defect') rowClass = "border-amber-500 bg-amber-50 hover:bg-amber-100";
+                         else rowClass = "border-red-500 bg-red-50 hover:bg-red-100";
                          
+                         // Helper to render extended values cleanly
                          const renderExtended = () => {
                            if (!row.additionalValues || row.additionalValues.every(v => !v)) return null;
+                           // Only show values that correspond to configured labels (if we can find the stage config)
                            return (
-                             <div className="mt-1 flex flex-col gap-1">
+                             <div className="mt-1 flex flex-wrap gap-1">
                                {row.additionalValues.map((v, i) => {
                                  if (!v) return null;
                                  const label = rowStageObj?.additionalFieldLabels?.[i];
                                  return (
-                                   <span key={i} className="text-xs bg-purple-50 text-purple-800 px-2 py-0.5 rounded border border-purple-100 w-fit">
-                                     {label ? <span className="font-semibold text-purple-900">{label}:</span> : ''} {v}
+                                   <span key={i} className="text-[10px] bg-purple-50 text-purple-700 px-1 rounded border border-purple-100 whitespace-nowrap">
+                                     {label ? `${label}: ` : ''}<b>{v}</b>
                                    </span>
                                  )
                                })}
@@ -870,39 +896,45 @@ export default function App() {
                          };
 
                          return (
-                           <tr key={row.id} className={rowClass}>
-                             <td className="p-4 text-gray-500 text-center">{row.stt}</td>
-                             <td className="p-4">
-                                <span className={`text-xs font-bold px-2 py-1 rounded border ${row.stage === currentStage ? 'bg-blue-100 text-blue-700 border-blue-200' : 'bg-gray-100 text-gray-600 border-gray-200'}`}>
-                                    {rowStageObj?.name || `Stage ${row.stage}`}
-                                </span>
-                             </td>
-                             <td className={`p-4 font-mono font-medium ${row.status === 'error' ? 'text-red-700 line-through' : row.status === 'defect' ? 'text-amber-800' : 'text-blue-700'}`}>
+                           <tr key={row.id} className={`border-l-4 ${rowClass}`}>
+                             <td className="p-3 text-gray-500">{row.stt}</td>
+                             <td className={`p-3 font-mono font-medium ${row.status === 'error' ? 'text-red-700 line-through' : row.status === 'defect' ? 'text-amber-800' : 'text-blue-700'}`}>
                                {row.productCode}
                              </td>
-                             <td className="p-4 font-bold text-gray-700">
+                             <td className="p-3 font-bold text-gray-700">
                                {row.modelName || <span className="text-gray-300">-</span>}
                              </td>
-                             <td className="p-4 align-top">
-                                {row.measurement && <div className="font-bold text-purple-700 mb-1">{rowStageObj?.measurementLabel}: {row.measurement}</div>}
+                             <td className="p-3">
+                               <span className="bg-gray-100 px-2 py-1 rounded text-xs font-bold border border-gray-200 block truncate max-w-[150px]" title={rowStageName}>
+                                 {rowStageName}
+                               </span>
+                             </td>
+                             <td className="p-3">
+                                <div className="font-medium text-purple-700">{row.measurement || '-'}</div>
                                 {renderExtended()}
                              </td>
-                             <td className="p-4 text-gray-900">{row.employeeId}</td>
-                             <td className="p-4">
+                             <td className="p-3">
+                               {(row.status === 'valid' || row.status === 'defect') && (
+                                 <div className="flex gap-1">
+                                    {[1,2,3,4,5].map(step => (
+                                      <div key={step} className={`w-2 h-4 rounded-sm ${step <= rowProgress ? 'bg-green-500' : 'bg-gray-200'}`} title={`Step ${step}`}/>
+                                    ))}
+                                 </div>
+                               )}
+                             </td>
+                             <td className="p-3 text-gray-900">{row.employeeId}</td>
+                             <td className="p-3">
                                {row.status === 'valid' ? (
-                                 <div className="text-sm text-gray-500 flex items-center gap-1.5">
-                                   <CheckCircle size={16} className="text-green-500"/>
-                                   <span className="font-bold text-green-700">{labels.valid}</span>
-                                   <span className="opacity-50">|</span>
+                                 <div className="text-xs text-gray-500">
                                    {format(new Date(row.timestamp), 'HH:mm:ss')}
                                  </div>
                                ) : row.status === 'defect' ? (
-                                  <span className="text-amber-700 font-bold text-sm flex items-center gap-1.5">
-                                   <XCircle size={16}/> {labels.defect}: {row.note}
+                                  <span className="text-amber-700 font-bold text-xs flex items-center gap-1">
+                                   <XCircle size={12}/> {row.note}
                                  </span>
                                ) : (
-                                 <span className="text-red-600 font-bold text-sm flex items-center gap-1.5">
-                                   <AlertTriangle size={16}/> {labels.error}: {row.note}
+                                 <span className="text-red-600 font-bold text-xs flex items-center gap-1">
+                                   <AlertTriangle size={12}/> {row.note}
                                  </span>
                                )}
                              </td>
@@ -922,11 +954,7 @@ export default function App() {
       <StageSettingsModal 
         isOpen={isSettingsOpen}
         stages={stages}
-        availableModels={availableModels}
-        onSave={(newStages, newModels) => {
-            setStages(newStages);
-            setAvailableModels(newModels);
-        }}
+        onSave={setStages}
         onClose={() => setIsSettingsOpen(false)}
       />
     </div>
