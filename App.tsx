@@ -1,100 +1,707 @@
-import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Download, ScanLine, Users, CheckCircle, AlertOctagon, RefreshCw, Box, Settings, AlertTriangle, Layers, Edit, XCircle, Activity, List, Tag, Upload, Maximize, Minimize } from 'lucide-react';
-import { format } from 'date-fns';
-import { read, utils } from 'xlsx';
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
-import { ScanRecord, Stats, ErrorState, DEFAULT_PROCESS_STAGES, Stage } from './types';
-import { Button } from './Button';
-import { ErrorModal } from './ErrorModal';
-import { StatCard } from './StatCard';
-import { StageSettingsModal } from './StageSettingsModal';
+import React, { useState, useEffect, useRef, Fragment } from 'react';
+import { Stage, Layer, Rect, Text, Arrow, Group, Line, Transformer } from 'react-konva';
+import { 
+  Factory, 
+  Cpu, 
+  Package, 
+  ArrowRightLeft, 
+  Plus, 
+  Trash2, 
+  Save, 
+  Download,
+  Settings2,
+  AlertCircle,
+  FolderOpen,
+  FilePlus,
+  ChevronDown,
+  RotateCw,
+  Copy,
+  Pencil,
+  Check,
+  User,
+  ChevronLeft,
+  Maximize2,
+  Minimize2
+} from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+
+// --- Types ---
+export type ElementType = 'machine' | 'workstation' | 'storage' | 'conveyor' | 'area' | 'label' | 'arrow' | 'worker';
+
+export interface LayoutElement {
+  id: string;
+  type: ElementType;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  name: string;
+  status: 'active' | 'maintenance' | 'idle';
+  capacity?: number;
+  color: string;
+  rotation?: number;
+  fontSize?: number;
+  showCross?: boolean; // For pallet areas
+  isVertical?: boolean;
+  task?: string; // For workers
+}
+
+export interface Connection {
+  id: string;
+  fromId: string;
+  toId: string;
+  type?: 'flow' | 'logic';
+}
+
+export interface FactoryLayout {
+  elements: LayoutElement[];
+  connections: Connection[];
+  viewport?: {
+    x: number;
+    y: number;
+    zoom: number;
+  };
+}
+
+// --- Constants ---
+const INITIAL_LAYOUT: FactoryLayout = {
+  elements: [
+    // Top Area: RMA / Test
+    { id: 'a1', type: 'area', x: 300, y: 210, width: 520, height: 70, name: 'Khu vực RMA / Test', status: 'active', color: '#fff' },
+    { id: 'e1', type: 'machine', x: 315, y: 230, width: 100, height: 35, name: 'Line RMA', status: 'active', color: '#fff' },
+    { id: 'e2', type: 'storage', x: 455, y: 225, width: 20, height: 20, name: 'Xe đẩy', status: 'active', color: '#fff' },
+    { id: 'e3', type: 'storage', x: 455, y: 250, width: 20, height: 20, name: 'Xe đẩy', status: 'active', color: '#fff' },
+    { id: 'e4', type: 'machine', x: 485, y: 225, width: 50, height: 40, name: 'Khu vực máy test lạnh', status: 'active', color: '#fff' },
+    { id: 'c2', type: 'conveyor', x: 620, y: 240, width: 160, height: 20, name: 'Băng tải 1', status: 'active', color: '#2d5a27' },
+    
+    // Main Horizontal Line
+    { id: 'l2', type: 'label', x: 450, y: 290, width: 200, height: 30, name: 'SHA76222KL', status: 'active', color: '#000', fontSize: 24 },
+    { id: 'c1', type: 'conveyor', x: 300, y: 325, width: 510, height: 20, name: 'Line chính nối thêm 2m về phía đóng thùng', status: 'active', color: '#2d5a27' },
+    
+    // Middle Section: Assembly & Workers
+    { id: 'e5', type: 'machine', x: 505, y: 470, width: 35, height: 50, name: 'Bàn assembly', status: 'active', color: '#fff' },
+    { id: 'e6', type: 'machine', x: 515, y: 580, width: 40, height: 30, name: 'Kệ để thùng carton', status: 'active', color: '#fff' },
+    { id: 'e7', type: 'machine', x: 575, y: 540, width: 40, height: 20, name: 'Kệ để hàng hóa', status: 'active', color: '#fff' },
+    
+    // Workers
+    { id: 'w1', type: 'worker', x: 535, y: 535, width: 40, height: 40, name: 'Nam', status: 'active', color: '#fbbf24', task: 'Gắn vít' },
+    { id: 'w2', type: 'worker', x: 590, y: 575, width: 40, height: 40, name: 'Nguyễn Văn A', status: 'active', color: '#fbbf24', task: 'Gắn nút nhấn và bộ gõ' },
+    { id: 'w3', type: 'worker', x: 590, y: 495, width: 40, height: 40, name: 'Trần Thị Q', status: 'active', color: '#fbbf24', task: 'Test bộ gõ (L1, Ch)' },
+    { id: 'w4', type: 'worker', x: 590, y: 440, width: 40, height: 40, name: 'Mẫn (May)', status: 'active', color: '#fbbf24', task: '' },
+    { id: 'w5', type: 'worker', x: 590, y: 385, width: 40, height: 40, name: 'Trần Thị R', status: 'active', color: '#fbbf24', task: 'May bao bì nhựa' },
+    
+    // Vertical Conveyors
+    { id: 'c3', type: 'conveyor', x: 615, y: 375, width: 15, height: 235, name: 'V1', status: 'active', color: '#2d5a27' },
+    { id: 'c4', type: 'conveyor', x: 690, y: 375, width: 30, height: 325, name: 'V2', status: 'active', color: '#2d5a27' },
+    { id: 'c5', type: 'conveyor', x: 805, y: 375, width: 15, height: 235, name: 'V3', status: 'active', color: '#2d5a27' },
+    
+    // Left Section: KHO
+    { id: 'a2', type: 'area', x: 130, y: 540, width: 130, height: 95, name: 'KHO', status: 'active', color: '#fff' },
+    { id: 'p1', type: 'storage', x: 240, y: 240, width: 25, height: 70, name: 'Pallet', status: 'active', color: '#fff', showCross: true },
+    { id: 'p2', type: 'storage', x: 115, y: 440, width: 25, height: 70, name: 'Mút xốp', status: 'active', color: '#fff', showCross: true },
+    { id: 'p3', type: 'storage', x: 190, y: 440, width: 25, height: 70, name: 'Pallet', status: 'active', color: '#fff', showCross: true },
+  ],
+  connections: []
+};
+
+const MM_PER_PX = 10;
+
+// --- Components ---
+
+interface CanvasProps {
+  layout: FactoryLayout;
+  onUpdateElement: (id: string, updates: Partial<LayoutElement>) => void;
+  onUpdateElements: (ids: string[], updates: (el: LayoutElement) => Partial<LayoutElement>) => void;
+  onSelectElements: (ids: string[]) => void;
+  onUpdateViewport: (x: number, y: number, zoom: number) => void;
+  selectedIds: string[];
+}
+
+  const Canvas: React.FC<CanvasProps> = ({ layout, onUpdateElement, onUpdateElements, onSelectElements, onUpdateViewport, selectedIds }) => {
+    const stageRef = useRef<any>(null);
+    const transformerRef = useRef<any>(null);
+    const containerRef = useRef<HTMLDivElement>(null);
+    const [selectionBox, setSelectionBox] = useState<{ x1: number, y1: number, x2: number, y2: number } | null>(null);
+    const [isPanning, setIsPanning] = useState(false);
+    const [lastPanPos, setLastPanPos] = useState({ x: 0, y: 0 });
+    const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
+  
+    useEffect(() => {
+      const updateDimensions = () => {
+        if (containerRef.current) {
+          setDimensions({
+            width: containerRef.current.offsetWidth,
+            height: containerRef.current.offsetHeight
+          });
+        }
+      };
+  
+      const resizeObserver = new ResizeObserver(updateDimensions);
+      if (containerRef.current) {
+        resizeObserver.observe(containerRef.current);
+      }
+  
+      updateDimensions();
+      window.addEventListener('resize', updateDimensions);
+      
+      return () => {
+        resizeObserver.disconnect();
+        window.removeEventListener('resize', updateDimensions);
+      };
+    }, []);
+
+  useEffect(() => {
+    if (selectedIds.length > 0 && transformerRef.current) {
+      const stage = stageRef.current;
+      const selectedNodes = selectedIds.map(id => stage.findOne('#' + id)).filter(node => !!node);
+      transformerRef.current.nodes(selectedNodes);
+      transformerRef.current.getLayer().batchDraw();
+    } else if (transformerRef.current) {
+      transformerRef.current.nodes([]);
+    }
+  }, [selectedIds]);
+
+  const handleDragMove = (id: string, e: any) => {
+    if (selectedIds.includes(id) && selectedIds.length > 1) {
+      const node = e.target;
+      const originalEl = layout.elements.find(el => el.id === id);
+      if (!originalEl) return;
+      
+      const dx = node.x() - originalEl.x;
+      const dy = node.y() - originalEl.y;
+      
+      selectedIds.forEach(sid => {
+        if (sid !== id) {
+          const otherNode = stageRef.current.findOne('#' + sid);
+          if (otherNode) {
+            const otherOriginalEl = layout.elements.find(el => el.id === sid);
+            if (otherOriginalEl) {
+              otherNode.x(otherOriginalEl.x + dx);
+              otherNode.y(otherOriginalEl.y + dy);
+            }
+          }
+        }
+      });
+      stageRef.current.batchDraw();
+    }
+  };
+
+  const handleDragEnd = (id: string, e: any) => {
+    if (selectedIds.includes(id) && selectedIds.length > 1) {
+      const node = e.target;
+      const dx = node.x() - layout.elements.find(el => el.id === id)!.x;
+      const dy = node.y() - layout.elements.find(el => el.id === id)!.y;
+      
+      onUpdateElements(selectedIds, (el) => ({
+        x: el.x + dx,
+        y: el.y + dy
+      }));
+    } else {
+      onUpdateElement(id, {
+        x: e.target.x(),
+        y: e.target.y(),
+      });
+    }
+  };
+
+  const handleTransformEnd = (id: string, e: any) => {
+    const node = e.target;
+    if (selectedIds.length > 1) {
+      onUpdateElements(selectedIds, (el) => {
+        const n = stageRef.current.findOne('#' + el.id);
+        return {
+          x: n.x(),
+          y: n.y(),
+          width: n.width() * n.scaleX(),
+          height: n.height() * n.scaleY(),
+          rotation: n.rotation()
+        };
+      });
+      selectedIds.forEach(sid => {
+        const n = stageRef.current.findOne('#' + sid);
+        n.scaleX(1);
+        n.scaleY(1);
+      });
+    } else {
+      onUpdateElement(id, {
+        x: node.x(),
+        y: node.y(),
+        width: Math.max(5, node.width() * node.scaleX()),
+        height: Math.max(5, node.height() * node.scaleY()),
+        rotation: node.rotation(),
+      });
+      node.scaleX(1);
+      node.scaleY(1);
+    }
+  };
+
+  const handleMouseDown = (e: any) => {
+    const stage = e.target.getStage();
+    const pos = stage.getPointerPosition();
+    
+    if (e.evt.button === 1) {
+      setIsPanning(true);
+      setLastPanPos(pos);
+      stage.container().style.cursor = 'grabbing';
+      return;
+    }
+
+    if (e.target === stage && e.evt.button === 0) {
+      const scale = stage.scaleX();
+      const stageX = stage.x();
+      const stageY = stage.y();
+      
+      const x = (pos.x - stageX) / scale;
+      const y = (pos.y - stageY) / scale;
+      
+      setSelectionBox({ x1: x, y1: y, x2: x, y2: y });
+      onSelectElements([]);
+    }
+  };
+
+  const handleMouseMove = (e: any) => {
+    const stage = e.target.getStage();
+    const pos = stage.getPointerPosition();
+
+    if (isPanning) {
+      const dx = pos.x - lastPanPos.x;
+      const dy = pos.y - lastPanPos.y;
+      const newX = stage.x() + dx;
+      const newY = stage.y() + dy;
+      
+      stage.position({ x: newX, y: newY });
+      setLastPanPos(pos);
+      onUpdateViewport(newX, newY, stage.scaleX());
+      return;
+    }
+
+    if (selectionBox) {
+      const scale = stage.scaleX();
+      const stageX = stage.x();
+      const stageY = stage.y();
+      
+      const x = (pos.x - stageX) / scale;
+      const y = (pos.y - stageY) / scale;
+      
+      setSelectionBox({ ...selectionBox, x2: x, y2: y });
+    }
+  };
+
+  const handleMouseUp = (e: any) => {
+    if (isPanning) {
+      setIsPanning(false);
+      e.target.getStage().container().style.cursor = 'default';
+    }
+
+    if (selectionBox) {
+      const x1 = Math.min(selectionBox.x1, selectionBox.x2);
+      const y1 = Math.min(selectionBox.y1, selectionBox.y2);
+      const x2 = Math.max(selectionBox.x1, selectionBox.x2);
+      const y2 = Math.max(selectionBox.y1, selectionBox.y2);
+      
+      const selected = layout.elements.filter(el => {
+        const ex1 = el.x;
+        const ey1 = el.y;
+        const ex2 = el.x + el.width;
+        const ey2 = el.y + el.height;
+        return !(ex1 > x2 || ex2 < x1 || ey1 > y2 || ey2 < y1);
+      }).map(el => el.id);
+      
+      onSelectElements(selected);
+      setSelectionBox(null);
+    }
+  };
+
+  const handleStageDragEnd = (e: any) => {
+    if (e.target === stageRef.current) {
+      onUpdateViewport(e.target.x(), e.target.y(), layout.viewport?.zoom || 1);
+    }
+  };
+
+  const handleWheel = (e: any) => {
+    e.evt.preventDefault();
+    const stage = stageRef.current;
+    const oldScale = stage.scaleX();
+    const pointer = stage.getPointerPosition();
+
+    const mousePointTo = {
+      x: (pointer.x - stage.x()) / oldScale,
+      y: (pointer.y - stage.y()) / oldScale,
+    };
+
+    const scaleBy = 1.1;
+    const newScale = e.evt.deltaY < 0 ? oldScale * scaleBy : oldScale / scaleBy;
+
+    stage.scale({ x: newScale, y: newScale });
+
+    const newPos = {
+      x: pointer.x - mousePointTo.x * newScale,
+      y: pointer.y - mousePointTo.y * newScale,
+    };
+    stage.position(newPos);
+    onUpdateViewport(newPos.x, newPos.y, newScale);
+  };
+
+  const handleElementClick = (id: string, e: any) => {
+    e.cancelBubble = true;
+    if (e.evt.shiftKey) {
+      if (selectedIds.includes(id)) {
+        onSelectElements(selectedIds.filter(sid => sid !== id));
+      } else {
+        onSelectElements([...selectedIds, id]);
+      }
+    } else {
+      if (!selectedIds.includes(id)) {
+        onSelectElements([id]);
+      }
+    }
+  };
+
+  const renderElement = (el: LayoutElement) => {
+    const isSelected = selectedIds.includes(el.id);
+    
+    if (el.type === 'label') {
+      return (
+        <Group
+          key={el.id}
+          id={el.id}
+          x={el.x}
+          y={el.y}
+          draggable
+          onDragMove={(e) => handleDragMove(el.id, e)}
+          onDragEnd={(e) => handleDragEnd(el.id, e)}
+          onTransformEnd={(e) => handleTransformEnd(el.id, e)}
+          onClick={(e) => handleElementClick(el.id, e)}
+          rotation={el.rotation || 0}
+        >
+          <Text
+            text={el.name}
+            fontSize={el.fontSize || 14}
+            fontStyle="bold"
+            fill="#000"
+            align="center"
+          />
+        </Group>
+      );
+    }
+
+    if (el.type === 'arrow') {
+      return (
+        <Arrow
+          key={el.id}
+          id={el.id}
+          points={[0, 0, el.width, el.height]}
+          x={el.x}
+          y={el.y}
+          stroke="#000"
+          fill="#000"
+          strokeWidth={2}
+          draggable
+          onDragMove={(e) => handleDragMove(el.id, e)}
+          onDragEnd={(e) => handleDragEnd(el.id, e)}
+          onTransformEnd={(e) => handleTransformEnd(el.id, e)}
+          onClick={(e) => handleElementClick(el.id, e)}
+          rotation={el.rotation || 0}
+        />
+      );
+    }
+
+    if (el.type === 'worker') {
+      return (
+        <Group
+          key={el.id}
+          id={el.id}
+          x={el.x}
+          y={el.y}
+          draggable
+          onDragMove={(e) => handleDragMove(el.id, e)}
+          onDragEnd={(e) => handleDragEnd(el.id, e)}
+          onTransformEnd={(e) => handleTransformEnd(el.id, e)}
+          onClick={(e) => handleElementClick(el.id, e)}
+          rotation={el.rotation || 0}
+        >
+          <Rect
+            x={el.width / 2 - 8}
+            y={0}
+            width={16}
+            height={16}
+            fill="#fbbf24"
+            cornerRadius={8}
+            stroke="#000"
+            strokeWidth={1}
+          />
+          <Rect
+            x={el.width / 2 - 12}
+            y={16}
+            width={24}
+            height={20}
+            fill="#3b82f6"
+            cornerRadius={4}
+            stroke="#000"
+            strokeWidth={1}
+          />
+          <Line
+            points={[el.width / 2 - 12, 20, el.width / 2 - 20, 30]}
+            stroke="#000"
+            strokeWidth={2}
+          />
+          <Line
+            points={[el.width / 2 + 12, 20, el.width / 2 + 20, 30]}
+            stroke="#000"
+            strokeWidth={2}
+          />
+          <Line
+            points={[el.width / 2 - 6, 36, el.width / 2 - 10, 50]}
+            stroke="#000"
+            strokeWidth={2}
+          />
+          <Line
+            points={[el.width / 2 + 6, 36, el.width / 2 + 10, 50]}
+            stroke="#000"
+            strokeWidth={2}
+          />
+
+          <Text
+            text={el.name}
+            fontSize={el.fontSize || 10}
+            fontStyle="bold"
+            width={el.width + 100}
+            x={-50}
+            align="center"
+            y={55}
+            fill="#000"
+            listening={false}
+          />
+          {el.task && (
+            <Text
+              text={`(${el.task})`}
+              fontSize={(el.fontSize || 10) * 0.9}
+              width={el.width + 120}
+              x={-60}
+              align="center"
+              y={55 + (el.fontSize || 10) + 2}
+              fill="#475569"
+              fontStyle="italic"
+              listening={false}
+            />
+          )}
+        </Group>
+      );
+    }
+
+    return (
+      <Group
+        key={el.id}
+        id={el.id}
+        x={el.x}
+        y={el.y}
+        draggable
+        onDragMove={(e) => handleDragMove(el.id, e)}
+        onDragEnd={(e) => handleDragEnd(el.id, e)}
+        onTransformEnd={(e) => handleTransformEnd(el.id, e)}
+        onClick={(e) => handleElementClick(el.id, e)}
+        rotation={el.rotation || 0}
+      >
+        <Rect
+          width={el.width}
+          height={el.height}
+          fill={el.type === 'area' ? 'transparent' : (el.type === 'conveyor' ? '#2d5a27' : el.color)}
+          stroke="#000"
+          strokeWidth={el.type === 'area' ? 2 : 1}
+          dash={el.type === 'area' ? [5, 5] : undefined}
+          shadowBlur={isSelected ? 5 : 0}
+          shadowColor="#3b82f6"
+        />
+
+        {el.showCross && (
+          <Fragment>
+            <Line points={[0, 0, el.width, el.height]} stroke="#000" strokeWidth={1} />
+            <Line points={[el.width, 0, 0, el.height]} stroke="#000" strokeWidth={1} />
+          </Fragment>
+        )}
+
+        {el.type === 'conveyor' && (
+          <Fragment>
+            {el.width >= el.height ? (
+              Array.from({ length: Math.floor(el.width / 40) }).map((_, i) => (
+                <Rect
+                  key={i}
+                  x={i * 40 + 5}
+                  y={2}
+                  width={30}
+                  height={el.height - 4}
+                  fill="#fff"
+                  stroke="#000"
+                  strokeWidth={1}
+                />
+              ))
+            ) : (
+              Array.from({ length: Math.floor(el.height / 40) }).map((_, i) => (
+                <Rect
+                  key={i}
+                  x={2}
+                  y={i * 40 + 5}
+                  width={el.width - 4}
+                  height={30}
+                  fill="#fff"
+                  stroke="#000"
+                  strokeWidth={1}
+                />
+              ))
+            )}
+          </Fragment>
+        )}
+
+        {el.type !== 'area' && (
+          <Text
+            text={el.name}
+            fontSize={el.fontSize || 10}
+            fontStyle="bold"
+            width={el.width}
+            align="center"
+            y={el.height / 2 - 5}
+            fill={el.type === 'conveyor' ? '#000' : (el.color === '#fff' ? '#000' : '#fff')}
+            listening={false}
+          />
+        )}
+
+        {el.type === 'area' && (
+          <Text
+            text={el.name}
+            fontSize={12}
+            fontStyle="bold"
+            x={5}
+            y={5}
+            fill="#000"
+            listening={false}
+          />
+        )}
+      </Group>
+    );
+  };
+
+  return (
+    <div ref={containerRef} className="w-full h-full bg-white overflow-hidden border border-slate-300 rounded-xl shadow-lg cursor-grab active:cursor-grabbing relative">
+      <div className="absolute bottom-4 left-4 bg-white/80 backdrop-blur-sm px-3 py-1.5 rounded-lg border border-slate-200 text-[10px] font-mono text-slate-600 z-20 pointer-events-none flex flex-col gap-1">
+        <div className="flex items-center gap-2">
+          <span className="font-bold text-indigo-600">SCALE:</span>
+          <span>1px = 10mm</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="font-bold text-indigo-600">ZOOM:</span>
+          <span>{Math.round((layout.viewport?.zoom || 1) * 100)}%</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="font-bold text-indigo-600">GRID:</span>
+          <span>400mm</span>
+        </div>
+      </div>
+
+      <Stage
+        width={dimensions.width}
+        height={dimensions.height}
+        ref={stageRef}
+        draggable={!selectionBox && !isPanning}
+        x={layout.viewport?.x || 0}
+        y={layout.viewport?.y || 0}
+        scaleX={layout.viewport?.zoom || 1}
+        scaleY={layout.viewport?.zoom || 1}
+        onDragEnd={handleStageDragEnd}
+        onWheel={handleWheel}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onContextMenu={(e) => e.evt.preventDefault()}
+        onClick={(e) => {
+          if (e.target === e.target.getStage()) {
+            onSelectElements([]);
+          }
+        }}
+      >
+        <Layer>
+          {Array.from({ length: 100 }).map((_, i) => (
+            <Fragment key={i}>
+              <Line points={[i * 40, 0, i * 40, 3000]} stroke="#f0f0f0" strokeWidth={1} />
+              <Line points={[0, i * 40, 4000, i * 40]} stroke="#f0f0f0" strokeWidth={1} />
+            </Fragment>
+          ))}
+
+          {layout.elements.map(el => renderElement(el))}
+
+          {selectionBox && (
+            <Rect
+              x={Math.min(selectionBox.x1, selectionBox.x2)}
+              y={Math.min(selectionBox.y1, selectionBox.y2)}
+              width={Math.abs(selectionBox.x2 - selectionBox.x1)}
+              height={Math.abs(selectionBox.y2 - selectionBox.y1)}
+              fill="rgba(0, 161, 255, 0.3)"
+              stroke="rgba(0, 161, 255, 1)"
+              strokeWidth={1}
+            />
+          )}
+
+          {selectedIds.length > 0 && (
+            <Transformer
+              ref={transformerRef}
+              flipEnabled={false}
+              boundBoxFunc={(oldBox, newBox) => {
+                if (newBox.width < 5 || newBox.height < 5) {
+                  return oldBox;
+                }
+                return newBox;
+              }}
+            />
+          )}
+        </Layer>
+      </Stage>
+    </div>
+  );
+};
+
+// --- Main App Component ---
 
 export default function App() {
-  // --- STATE ---
-  
-  // Configuration
-  const [stageEmployees, setStageEmployees] = useState<Record<number, string>>({});
-  const [currentModel, setCurrentModel] = useState<string>(''); // Used for IMEI Validation (Space separated list)
-  const [modelName, setModelName] = useState<string>(''); // New: Actual Model Name
-  
-  // Dynamic Stages with LocalStorage Persistence
-  const [stages, setStages] = useState<Stage[]>(() => {
-    try {
-      const saved = localStorage.getItem('proscan_stages');
-      if (saved) {
-        // Migration support for old data
-        const parsed = JSON.parse(saved);
-        return parsed.map((s: any) => ({
-          ...s,
-          // Update default array size from potential old/new sizes to 8
-          additionalFieldLabels: s.additionalFieldLabels ? [...s.additionalFieldLabels, ...Array(8).fill("")].slice(0, 8) : Array(8).fill(""),
-          additionalFieldDefaults: s.additionalFieldDefaults ? [...s.additionalFieldDefaults, ...Array(8).fill("")].slice(0, 8) : Array(8).fill("")
-        }));
-      }
-    } catch (e) {
-      console.error("Failed to load stages from storage", e);
-    }
-    return DEFAULT_PROCESS_STAGES;
+  const [models, setModels] = useState<Record<string, FactoryLayout>>(() => {
+    const saved = localStorage.getItem('factory-models');
+    return saved ? JSON.parse(saved) : { 'Mặc định': INITIAL_LAYOUT };
   });
-
-  // Ensure currentStage is valid initially (fallback to first available stage)
-  const [currentStage, setCurrentStage] = useState<number>(() => {
-    return stages.length > 0 ? stages[0].id : 1;
+  const [currentModelName, setCurrentModelName] = useState<string>(() => {
+    return localStorage.getItem('current-model-name') || 'Mặc định';
   });
-
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [layout, setLayout] = useState<FactoryLayout>(() => {
+    return models[currentModelName] || INITIAL_LAYOUT;
+  });
+  const [history, setHistory] = useState<FactoryLayout[]>([]);
+  const [clipboard, setClipboard] = useState<LayoutElement[]>([]);
+  const [newModelName, setNewModelName] = useState('');
+  const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
+  const [editingModelName, setEditingModelName] = useState<string | null>(null);
+  const [tempModelName, setTempModelName] = useState('');
+  const [appName, setAppName] = useState(() => localStorage.getItem('app-name') || 'FactoryFlow AI');
+  const [isEditingAppName, setIsEditingAppName] = useState(false);
+  const [tempAppName, setTempAppName] = useState('');
+  
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
 
-  // Data
-  const [history, setHistory] = useState<ScanRecord[]>([]);
-  const [productProgress, setProductProgress] = useState<Record<string, number>>({});
-  const [productStatus, setProductStatus] = useState<Record<string, 'valid' | 'defect'>>({});
-  
-  // UI State
-  const [stats, setStats] = useState<Stats>({ success: 0, defect: 0, error: 0 });
-  
-  // Inputs
-  const [employeeInput, setEmployeeInput] = useState('');
-  const [defectCode, setDefectCode] = useState(''); 
-  const [measurementValue, setMeasurementValue] = useState(''); 
-  const [productInput, setProductInput] = useState('');
-  
-  // New: State for 8 additional fields
-  const [additionalValues, setAdditionalValues] = useState<string[]>(Array(8).fill(""));
-  
-  const [errorModal, setErrorModal] = useState<ErrorState>({ isOpen: false, message: '' });
-
-  // Refs
-  const employeeInputRef = useRef<HTMLInputElement>(null);
-  const defectInputRef = useRef<HTMLInputElement>(null);
-  const measurementInputRef = useRef<HTMLInputElement>(null);
-  const productInputRef = useRef<HTMLInputElement>(null);
-  const modelInputRef = useRef<HTMLInputElement>(null);
-  const modelNameRef = useRef<HTMLInputElement>(null); // New Ref for Model Name
-  // Refs for 8 additional inputs
-  const extraInputRefs = useRef<(HTMLInputElement | null)[]>([]);
-
-  // --- EFFECT: Save Stages to LocalStorage ---
-  useEffect(() => {
-    localStorage.setItem('proscan_stages', JSON.stringify(stages));
-  }, [stages]);
-
-  // --- EFFECT: Calculate Stats for Current Stage ---
-  useEffect(() => {
-    const currentStageSuccess = history.filter(
-      r => r.status === 'valid' && r.stage === currentStage
-    ).length;
-
-    const currentStageDefect = history.filter(
-      r => r.status === 'defect' && r.stage === currentStage
-    ).length;
-    
-    setStats(prev => ({ 
-      ...prev, 
-      success: currentStageSuccess,
-      defect: currentStageDefect
-    }));
-  }, [history, currentStage]);
+  const toggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      containerRef.current?.requestFullscreen().catch(err => {
+        console.error(`Error attempting to enable full-screen mode: ${err.message}`);
+      });
+      setIsFullscreen(true);
+    } else {
+      document.exitFullscreen();
+      setIsFullscreen(false);
+    }
+  };
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -103,860 +710,561 @@ export default function App() {
     document.addEventListener('fullscreenchange', handleFullscreenChange);
     return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
   }, []);
-
-  // --- HELPER: Get Current Stage Object & Employee ---
-  const currentStageObj = useMemo(() => stages.find(s => s.id === currentStage), [stages, currentStage]);
-  const currentEmployeeId = stageEmployees[currentStage];
   
-  // Determine active extra fields (those with labels)
-  const activeExtraFields = useMemo(() => {
-    if (!currentStageObj?.additionalFieldLabels) return [];
-    return currentStageObj.additionalFieldLabels.map((label, idx) => ({ label, idx })).filter(f => f.label.trim() !== "");
-  }, [currentStageObj]);
-
-  // Helper to load defaults for current stage
-  const loadDefaults = useCallback(() => {
-    if (currentStageObj?.additionalFieldDefaults) {
-      // Create a copy of defaults, ensuring empty strings for missing values
-      const defaults = [...currentStageObj.additionalFieldDefaults];
-      while(defaults.length < 8) defaults.push("");
-      setAdditionalValues(defaults);
-    } else {
-      setAdditionalValues(Array(8).fill(""));
-    }
-  }, [currentStageObj]);
-
-  // Apply defaults when stage changes
   useEffect(() => {
-    loadDefaults();
-  }, [currentStage, loadDefaults]);
+    const updatedModels = { ...models, [currentModelName]: layout };
+    setModels(updatedModels);
+    localStorage.setItem('factory-models', JSON.stringify(updatedModels));
+    localStorage.setItem('current-model-name', currentModelName);
+  }, [layout, currentModelName]);
 
-  // --- INITIAL FOCUS ---
+  const undo = () => {
+    if (history.length === 0) return;
+    const previous = history[history.length - 1];
+    setHistory(prev => prev.slice(0, -1));
+    setLayout(previous);
+  };
+
+  const copyElement = () => {
+    const selected = layout.elements.filter(el => selectedIds.includes(el.id));
+    if (selected.length > 0) {
+      setClipboard(selected);
+    }
+  };
+
+  const pasteElement = () => {
+    if (!clipboard || (Array.isArray(clipboard) && clipboard.length === 0)) return;
+    
+    const elementsToPaste = Array.isArray(clipboard) ? clipboard : [clipboard];
+    const newElements = elementsToPaste.map(el => ({
+      ...el,
+      id: Math.random().toString(36).substr(2, 9),
+      x: el.x + 20,
+      y: el.y + 20,
+    }));
+
+    updateLayoutWithHistory(prev => ({
+      ...prev,
+      elements: [...prev.elements, ...newElements]
+    }));
+    setSelectedIds(newElements.map(el => el.id));
+  };
+
   useEffect(() => {
-    if (!modelName) modelNameRef.current?.focus();
-    else if (!currentModel) modelInputRef.current?.focus();
-    else if (!currentEmployeeId) employeeInputRef.current?.focus();
-    else {
-      // Logic for initial focus based on stage config
-      if (currentStageObj?.enableMeasurement) measurementInputRef.current?.focus();
-      else productInputRef.current?.focus();
-    }
-  }, [currentStage]);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const isInput = ['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName);
+      if (isInput) return;
 
-  // --- HANDLERS ---
-  
-  const toggleFullScreen = () => {
-    if (!document.fullscreenElement) {
-      document.documentElement.requestFullscreen().catch(err => {
-        console.error(`Error attempting to enable full-screen mode: ${err.message}`);
-      });
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+        e.preventDefault();
+        undo();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+        copyElement();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+        pasteElement();
+      }
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (selectedIds.length > 0) {
+          deleteElement();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [history, layout, selectedIds, clipboard]);
+
+  const updateLayoutWithHistory = (newLayout: FactoryLayout | ((prev: FactoryLayout) => FactoryLayout)) => {
+    setHistory(prev => [...prev.slice(-29), layout]);
+    if (typeof newLayout === 'function') {
+      setLayout(newLayout);
     } else {
-      if (document.exitFullscreen) {
-        document.exitFullscreen();
-      }
+      setLayout(newLayout);
     }
   };
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const saveNewModel = () => {
+    if (!newModelName.trim()) return;
+    const updatedModels = { ...models, [newModelName]: layout };
+    setModels(updatedModels);
+    setCurrentModelName(newModelName);
+    setNewModelName('');
+    localStorage.setItem('factory-models', JSON.stringify(updatedModels));
+    localStorage.setItem('current-model-name', newModelName);
+  };
 
-    try {
-      const data = await file.arrayBuffer();
-      const workbook = read(data);
-      const firstSheetName = workbook.SheetNames[0];
-      const worksheet = workbook.Sheets[firstSheetName];
-      
-      // Get data as array of arrays to be safe about column structure
-      // Type 'any' used because sheet_to_json returns generic objects
-      const jsonData = utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
-      
-      // Extract 1st column, filter empties, join by space
-      const codes = jsonData
-          .map(row => row[0]) // Take first cell of each row
-          .filter(cell => cell !== undefined && cell !== null && String(cell).trim() !== '')
-          .map(cell => String(cell).trim().toUpperCase());
+  const loadModel = (name: string) => {
+    setCurrentModelName(name);
+    setLayout(models[name]);
+    setIsModelMenuOpen(false);
+  };
 
-      if (codes.length === 0) {
-        alert("File không có dữ liệu ở cột A!");
-        return;
-      }
-
-      const resultString = codes.join(' ');
-      setCurrentModel(resultString);
-      alert(`Đã tải thành công ${codes.length} mã kiểm tra!`);
-      
-      // Reset file input
-      e.target.value = '';
-    } catch (err) {
-      console.error(err);
-      alert("Lỗi đọc file Excel. Vui lòng kiểm tra lại định dạng.");
+  const deleteModel = (name: string) => {
+    if (Object.keys(models).length <= 1) return;
+    const { [name]: _, ...rest } = models;
+    setModels(rest);
+    if (currentModelName === name) {
+      const nextName = Object.keys(rest)[0];
+      setCurrentModelName(nextName);
+      setLayout(rest[nextName]);
     }
+    localStorage.setItem('factory-models', JSON.stringify(rest));
   };
 
-  const handleEmployeeScan = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      const val = employeeInput.trim();
-      if (val) {
-        setStageEmployees(prev => ({ ...prev, [currentStage]: val }));
-        setEmployeeInput('');
-        
-        // Smart Focus Next
-        setTimeout(() => {
-             if (currentStageObj?.enableMeasurement) measurementInputRef.current?.focus();
-             else productInputRef.current?.focus();
-        }, 50);
-      }
+  const duplicateModel = (name: string) => {
+    const baseName = `${name} (Copy)`;
+    let newName = baseName;
+    let counter = 1;
+    while (models[newName]) {
+      newName = `${baseName} ${counter}`;
+      counter++;
     }
+    const updatedModels = { ...models, [newName]: models[name] };
+    setModels(updatedModels);
+    localStorage.setItem('factory-models', JSON.stringify(updatedModels));
   };
 
-  const handleDefectScan = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') productInputRef.current?.focus();
-  };
-
-  const handleMeasurementScan = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      if (measurementValue.trim()) {
-        // Logic: Find the first ACTIVE field that DOES NOT have a value (skips defaults)
-        const nextField = activeExtraFields.find(f => !additionalValues[f.idx]);
-        
-        if (nextField) {
-           extraInputRefs.current[nextField.idx]?.focus();
-        } else if (activeExtraFields.length > 0) {
-           const hasManualFields = activeExtraFields.some(f => !currentStageObj?.additionalFieldDefaults?.[f.idx]);
-           if (!hasManualFields) {
-             productInputRef.current?.focus();
-           } else {
-             productInputRef.current?.focus();
-           }
-        } else {
-           productInputRef.current?.focus();
-        }
-      }
+  const renameModel = (oldName: string, newName: string) => {
+    if (!newName.trim() || oldName === newName || models[newName]) {
+      setEditingModelName(null);
+      return;
     }
-  };
-
-  const handleExtraInputScan = (e: React.KeyboardEvent<HTMLInputElement>, index: number) => {
-    if (e.key === 'Enter') {
-      // Find the next field in the ACTIVE list
-      const currentActivePos = activeExtraFields.findIndex(f => f.idx === index);
-      
-      if (currentActivePos !== -1 && currentActivePos < activeExtraFields.length - 1) {
-         let nextActivePos = currentActivePos + 1;
-         let nextRealIdx = activeExtraFields[nextActivePos].idx;
-
-         // Try to find the next empty field
-         while (nextActivePos < activeExtraFields.length && additionalValues[activeExtraFields[nextActivePos].idx]) {
-            const isDefaulted = !!currentStageObj?.additionalFieldDefaults?.[activeExtraFields[nextActivePos].idx];
-            if (!isDefaulted) break; // Found a manual field
-            nextActivePos++;
-         }
-
-         if (nextActivePos < activeExtraFields.length) {
-            nextRealIdx = activeExtraFields[nextActivePos].idx;
-            extraInputRefs.current[nextRealIdx]?.focus();
-         } else {
-            productInputRef.current?.focus();
-         }
-
-      } else {
-         // End of list
-         productInputRef.current?.focus();
-      }
+    const { [oldName]: modelData, ...rest } = models;
+    const updatedModels = { ...rest, [newName]: modelData };
+    setModels(updatedModels);
+    if (currentModelName === oldName) {
+      setCurrentModelName(newName);
     }
+    setEditingModelName(null);
+    localStorage.setItem('factory-models', JSON.stringify(updatedModels));
   };
 
-  const updateAdditionalValue = (index: number, value: string) => {
-    const newValues = [...additionalValues];
-    newValues[index] = value;
-    setAdditionalValues(newValues);
-  };
-
-  const handleError = (message: string, scannedCode: string = '') => {
-    setStats(prev => ({ ...prev, error: prev.error + 1 }));
-    
-    const errorRecord: ScanRecord = {
-      id: crypto.randomUUID(),
-      stt: history.length + 1,
-      productCode: scannedCode || '---',
-      model: currentModel || 'CHƯA CÓ',
-      modelName: modelName || '',
-      employeeId: currentEmployeeId || 'CHƯA CÓ',
-      timestamp: new Date().toISOString(),
-      status: 'error',
-      note: message,
-      stage: currentStage
+  const addElement = (type: ElementType) => {
+    const colors = {
+      machine: '#fff',
+      workstation: '#fff',
+      storage: '#fff',
+      conveyor: '#2d5a27',
+      area: '#fff',
+      label: '#000',
+      arrow: '#000',
+      worker: '#fbbf24'
     };
-    setHistory(prev => [errorRecord, ...prev]);
-    setErrorModal({ isOpen: true, message });
-  };
-
-  const handleSuccess = (code: string) => {
-    setProductProgress(prev => ({ ...prev, [code]: currentStage }));
-    setProductStatus(prev => ({ ...prev, [code]: 'valid' }));
-
-    const newRecord: ScanRecord = {
-      id: crypto.randomUUID(),
-      stt: history.length + 1,
-      productCode: code,
-      model: currentModel,
-      modelName: modelName,
-      employeeId: currentEmployeeId || 'UNKNOWN',
-      timestamp: new Date().toISOString(),
-      status: 'valid',
-      note: 'Thành công',
-      stage: currentStage,
-      measurement: currentStageObj?.enableMeasurement ? measurementValue : undefined,
-      additionalValues: currentStageObj?.enableMeasurement ? [...additionalValues] : undefined
+    
+    const newElement: LayoutElement = {
+      id: Math.random().toString(36).substr(2, 9),
+      type,
+      x: 100,
+      y: 100,
+      width: type === 'conveyor' ? 400 : (type === 'worker' ? 40 : 100),
+      height: type === 'conveyor' ? 40 : (type === 'worker' ? 40 : 100),
+      name: type === 'worker' ? 'Công nhân mới' : `Mới ${type}`,
+      status: 'active',
+      color: colors[type],
+      showCross: type === 'storage',
+      task: type === 'worker' ? 'Mô tả công việc' : undefined
     };
-
-    setHistory(prev => [newRecord, ...prev]);
     
-    // Reset Inputs
-    setProductInput('');
-    setDefectCode('');
-    setMeasurementValue(''); 
-    
-    // RESET TO DEFAULTS
-    loadDefaults();
-    
-    // Return Focus logic
-    setTimeout(() => {
-        if (currentStageObj?.enableMeasurement) measurementInputRef.current?.focus();
-        else productInputRef.current?.focus();
-    }, 50);
+    updateLayoutWithHistory(prev => ({
+      ...prev,
+      elements: [...prev.elements, newElement]
+    }));
   };
 
-  const handleDefectRecord = (code: string, reason: string) => {
-    setProductStatus(prev => ({ ...prev, [code]: 'defect' }));
-
-    const newRecord: ScanRecord = {
-      id: crypto.randomUUID(),
-      stt: history.length + 1,
-      productCode: code,
-      model: currentModel,
-      modelName: modelName,
-      employeeId: currentEmployeeId || 'UNKNOWN',
-      timestamp: new Date().toISOString(),
-      status: 'defect',
-      note: `Lỗi: ${reason}`,
-      stage: currentStage,
-      measurement: currentStageObj?.enableMeasurement ? measurementValue : undefined,
-      additionalValues: currentStageObj?.enableMeasurement ? [...additionalValues] : undefined
-    };
-
-    setHistory(prev => [newRecord, ...prev]);
-    
-    setProductInput('');
-    setDefectCode(''); 
-    setMeasurementValue('');
-    loadDefaults();
-
-    setTimeout(() => {
-        if (currentStageObj?.enableMeasurement) measurementInputRef.current?.focus();
-        else productInputRef.current?.focus();
-    }, 50);
+  const updateElement = (id: string, updates: Partial<LayoutElement>) => {
+    updateLayoutWithHistory(prev => ({
+      ...prev,
+      elements: prev.elements.map(el => el.id === id ? { ...el, ...updates } : el)
+    }));
   };
 
-  const handleProductScan = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      const code = productInput.trim();
-      if (!code) return;
+  const updateElements = (ids: string[], updates: (el: LayoutElement) => Partial<LayoutElement>) => {
+    updateLayoutWithHistory(prev => ({
+      ...prev,
+      elements: prev.elements.map(el => ids.includes(el.id) ? { ...el, ...updates(el) } : el)
+    }));
+  };
 
-      // VALIDATIONS
-      // 0. Model Name Check (MANDATORY)
-      if (!modelName.trim()) return handleError("Lỗi: Chưa nhập Tên Model.", code);
+  const updateViewport = (x: number, y: number, zoom: number) => {
+    setLayout(prev => ({
+      ...prev,
+      viewport: { x, y, zoom }
+    }));
+  };
 
-      // 1. Check if Validation List is Configured
-      if (!currentModel.trim()) return handleError("Lỗi: Chưa cài đặt Danh sách Mã chuẩn (Validation List).", code);
-      
-      // 2. Parse Valid Patterns (Split by whitespace)
-      // REGEX: /\s+/ matches one or more whitespace characters
-      const validPatterns = currentModel.trim().split(/\s+/).map(s => s.trim().toUpperCase()).filter(s => s.length > 0);
-      
-      // 3. Employee Check
-      if (!currentEmployeeId) return handleError(`Lỗi: Chưa xác định nhân viên cho công đoạn ${currentStage}.`, code);
-      
-      // 4. Validate Code against Patterns (Contains ANY)
-      const isMatch = validPatterns.some(pattern => code.toUpperCase().includes(pattern));
-      if (!isMatch) {
-         // Simplified Error Message as requested
-         return handleError(`Lỗi: Mã không nằm trong kế hoạch sản xuất.\nMã quét: ${code}`, code);
-      }
+  const resetView = () => {
+    updateViewport(0, 0, 1);
+  };
 
-      if (defectCode.trim()) {
-        handleDefectRecord(code, defectCode);
-        return;
-      }
+  const deleteElement = () => {
+    if (selectedIds.length === 0) return;
+    updateLayoutWithHistory(prev => ({
+      ...prev,
+      elements: prev.elements.filter(el => !selectedIds.includes(el.id)),
+      connections: prev.connections.filter(c => !selectedIds.includes(c.fromId) && !selectedIds.includes(c.toId))
+    }));
+    setSelectedIds([]);
+  };
 
-      // MEASUREMENT VALIDATION
-      if (currentStageObj?.enableMeasurement) {
-        const val = measurementValue.trim();
-        if (!val) {
-           measurementInputRef.current?.focus();
-           return handleError(`Lỗi: Công đoạn này yêu cầu nhập ${currentStageObj.measurementLabel || 'giá trị đo'}.`, code);
-        }
-
-        // CHECK AGAINST STANDARD
-        const standard = currentStageObj.measurementStandard?.trim();
-        if (standard) {
-          const stdNum = parseFloat(standard.replace(',', '.'));
-          const valNum = parseFloat(val.replace(',', '.'));
-
-          if (!isNaN(stdNum)) {
-             if (isNaN(valNum)) {
-                return handleError(`Lỗi: Tiêu chuẩn là số (${standard}), vui lòng nhập kết quả là số.`, code);
-             }
-             if (valNum >= stdNum) {
-                return handleError(`LỖI NG: Kết quả đo quá cao!\nTiêu chuẩn (Max): < ${standard}\nThực tế: ${val}`, code);
-             }
-          } else {
-             if (val.toUpperCase() !== standard.toUpperCase()) {
-                return handleError(`LỖI NG: Kết quả đo không đạt chuẩn!\nTiêu chuẩn: ${standard}\nThực tế: ${val}`, code);
-             }
-          }
-        }
-        
-        // Validate Additional Fields
-        for (const field of activeExtraFields) {
-           if (!additionalValues[field.idx].trim()) {
-             extraInputRefs.current[field.idx]?.focus();
-             return handleError(`Lỗi: Chưa nhập giá trị cho "${field.label}".`, code);
-           }
-        }
-      }
-
-      // LOGIC CHECKS
-      const currentProgress = productProgress[code] || 0;
-      const lastStatus = productStatus[code];
-
-      if (lastStatus === 'defect') {
-        if (currentStage > currentProgress + 1) {
-           return handleError("⛔ CẢNH BÁO: Sản phẩm bị LỖI (NG) chưa được xử lý.", code);
-        }
-      }
-      if (currentProgress >= currentStage) {
-        return handleError(`Lỗi: Mã đã PASS công đoạn ${currentStage} trước đó.`, code);
-      }
-      if (currentStage > 1 && currentProgress < currentStage - 1) {
-        return handleError(`Lỗi: Sai trình tự. Chưa hoàn thành công đoạn ${currentStage - 1}.`, code);
-      }
-
-      handleSuccess(code);
+  const saveAppName = () => {
+    if (tempAppName.trim()) {
+      setAppName(tempAppName);
+      localStorage.setItem('app-name', tempAppName);
     }
+    setIsEditingAppName(false);
   };
 
-  const handleCloseError = () => {
-    setErrorModal({ isOpen: false, message: '' });
-    setProductInput('');
-    
-    setTimeout(() => {
-      // Smart Focus recovery
-      if (!modelName.trim()) modelNameRef.current?.focus();
-      else if (!currentModel.trim()) modelInputRef.current?.focus();
-      else if (!currentEmployeeId) employeeInputRef.current?.focus();
-      else if (currentStageObj?.enableMeasurement) {
-         if (!measurementValue) measurementInputRef.current?.focus();
-         else productInputRef.current?.focus(); // Simplified
-      }
-      else productInputRef.current?.focus();
-    }, 50);
-  };
-
-  const exportCSV = useCallback(() => {
-    // 1. Calculate Dynamic Headers based on ALL stages configuration
-    // We create a definition map to know which column pulls from which data index
-    const dynamicColsDef: { header: string, stageId: number, valueIndex: number }[] = [];
-
-    stages.forEach(stage => {
-        // Only consider stages that have at least one label configured
-        if (stage.additionalFieldLabels?.some(l => l && l.trim())) {
-             stage.additionalFieldLabels.forEach((label, idx) => {
-                 if (label && label.trim()) {
-                     // Create a header like "S1: Voltage" or "Stage 1 - Voltage"
-                     // Using specific stage name prefix to avoid ambiguity
-                     dynamicColsDef.push({
-                         header: `${stage.name} - ${label}`,
-                         stageId: stage.id,
-                         valueIndex: idx
-                     });
-                 }
-             });
-        }
-    });
-
-    // 2. Prepare full Header row
-    const headers = [
-        "STT", 
-        "Mã IMEI máy", 
-        "Tên Model", 
-        "Mã Kiểm Tra (IMEI)", 
-        "Công Đoạn", 
-        "Kết quả chính", 
-        ...dynamicColsDef.map(d => d.header), // The expanded dynamic columns
-        "Nhân Viên", 
-        "Thời Gian", 
-        "Trạng Thái", 
-        "Ghi Chú"
-    ];
-    
-    // 3. Map Data Rows
-    const rows = history.map(item => {
-      const stageObj = stages.find(s => s.id === item.stage);
-      const stageName = stageObj?.name || `Công đoạn ${item.stage}`;
-      
-      let statusText = 'LỖI';
-      if (item.status === 'valid') statusText = 'OK';
-      if (item.status === 'defect') statusText = 'NG (Hàng Lỗi)';
-      
-      // Map the dynamic columns
-      const dynamicCells = dynamicColsDef.map(def => {
-          // Only fill data if the record belongs to the column's stage
-          if (item.stage === def.stageId) {
-              return item.additionalValues?.[def.valueIndex] || "-";
-          }
-          return ""; // Empty cell for irrelevant stages
-      });
-
-      return [
-        item.stt,
-        item.productCode,
-        item.modelName || '',
-        item.model,
-        stageName,
-        item.measurement || '-',
-        ...dynamicCells,
-        item.employeeId,
-        format(new Date(item.timestamp), 'yyyy-MM-dd HH:mm:ss'),
-        statusText,
-        item.note || ''
-      ];
-    });
-
-    const csvContent = [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
-    const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement("a");
-    const url = URL.createObjectURL(blob);
-    link.setAttribute("href", url);
-    link.setAttribute("download", `scan_process_data_${format(new Date(), 'yyyyMMdd_HHmmss')}.csv`);
-    link.click();
-  }, [history, stages]);
-
-  const resetSession = () => {
-    if (confirm("CẢNH BÁO: Hành động này sẽ xóa toàn bộ lịch sử và tiến độ sản xuất hiện tại. Bạn có chắc không?")) {
-      setHistory([]);
-      setProductProgress({});
-      setProductStatus({});
-      setStageEmployees({});
-      setStats({ success: 0, defect: 0, error: 0 });
-      setProductInput('');
-      setDefectCode('');
-      setMeasurementValue('');
-      // Keep model settings? User might want to reset all.
-      // But typically setup params stay.
-      loadDefaults();
-      employeeInputRef.current?.focus();
-    }
-  };
-
-  const handleStageChange = (newStageId: number) => {
-    setCurrentStage(newStageId);
-    setMeasurementValue('');
-    
-    const newStage = stages.find(s => s.id === newStageId);
-    const empForNewStage = stageEmployees[newStageId];
-    
-    setTimeout(() => {
-        if (!empForNewStage) {
-            employeeInputRef.current?.focus();
-        } else if (newStage?.enableMeasurement) {
-            measurementInputRef.current?.focus();
-        } else {
-            productInputRef.current?.focus();
-        }
-    }, 50);
-  };
+  const selectedElement = layout.elements.find(el => selectedIds.length === 1 && el.id === selectedIds[0]);
 
   return (
-    <div className="min-h-screen flex flex-col bg-gray-100">
-      {/* Header */}
-      <header className="bg-slate-900 text-white p-4 shadow-lg sticky top-0 z-20">
-        <div className="w-full px-4 flex flex-col md:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="bg-blue-600 p-2 rounded-lg shadow-blue-500/50 shadow-lg">
-              <ScanLine size={28} />
+    <div ref={containerRef} className="flex h-screen bg-[#f8fafc] text-slate-900 font-sans overflow-hidden relative">
+      {/* Sidebar Left: Tools */}
+      <aside className={`bg-white border-r border-slate-200 flex flex-col shadow-sm z-20 transition-all duration-300 relative ${isSidebarOpen ? 'w-64' : 'w-0 overflow-hidden border-none'}`}>
+        <div className="p-6 border-bottom border-slate-100 min-w-[256px]">
+          <div className="flex items-center gap-2 mb-2">
+            <div className="bg-indigo-600 p-2 rounded-lg">
+              <Factory className="text-white w-5 h-5" />
             </div>
-            <div>
-              <h1 className="text-2xl font-bold tracking-tight">ProScan Process Gate</h1>
-              <p className="text-slate-400 text-xs uppercase tracking-wider">Ver 3.6 (8 Params)</p>
-            </div>
+            {isEditingAppName ? (
+              <input
+                autoFocus
+                type="text"
+                value={tempAppName}
+                onChange={(e) => setTempAppName(e.target.value)}
+                onBlur={saveAppName}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') saveAppName();
+                  if (e.key === 'Escape') setIsEditingAppName(false);
+                }}
+                className="font-bold text-xl tracking-tight w-full outline-none border-b-2 border-indigo-500 bg-transparent"
+              />
+            ) : (
+              <h1 
+                className="font-bold text-xl tracking-tight cursor-pointer hover:text-indigo-600 transition-colors"
+                onClick={() => {
+                  setTempAppName(appName);
+                  setIsEditingAppName(true);
+                }}
+                title="Nhấp để đổi tên"
+              >
+                {appName}
+              </h1>
+            )}
           </div>
-          
-          <div className="flex flex-col md:flex-row items-center gap-3 w-full md:w-auto">
-             
-             {/* New: Actual Model Name */}
-             <div className="flex items-center bg-slate-800 rounded px-3 py-1 border border-slate-700">
-                 <Tag size={16} className="text-slate-400 mr-2" />
-                 <input
-                    ref={modelNameRef}
-                    type="text"
-                    className="bg-transparent text-white border-none focus:ring-0 text-sm font-bold py-1 w-32 placeholder-slate-500 uppercase"
-                    placeholder="NHẬP TÊN MODEL"
-                    value={modelName}
-                    onChange={(e) => setModelName(e.target.value)}
-                  />
-             </div>
-
-             {/* Existing: Model/IMEI Validation with Upload */}
-             <div className="flex items-center bg-slate-800 rounded px-3 py-1 border border-slate-700">
-                 <Settings size={16} className="text-slate-400 mr-2" />
-                 <div className="flex items-center">
-                    <input
-                        ref={modelInputRef}
-                        type="text"
-                        className="bg-transparent text-white border-none focus:ring-0 text-sm font-bold py-1 w-32 placeholder-slate-500 uppercase"
-                        placeholder="MÃ KIỂM TRA (LIST)"
-                        title="Nhập danh sách mã hợp lệ (cách nhau bởi khoảng trắng) HOẶC upload file Excel"
-                        value={currentModel}
-                        onChange={(e) => setCurrentModel(e.target.value.toUpperCase())}
-                      />
-                      <label className="cursor-pointer hover:bg-slate-600 p-1 rounded transition-colors ml-1" title="Upload Excel (Cột A)">
-                        <Upload size={16} className="text-green-400" />
-                        <input 
-                          type="file" 
-                          className="hidden" 
-                          accept=".xlsx, .xls, .csv" 
-                          onChange={handleFileUpload}
-                        />
-                      </label>
-                 </div>
-             </div>
-             
-             <Button onClick={() => setIsSettingsOpen(true)} className="text-sm bg-slate-700 hover:bg-slate-600 border border-slate-600" title="Cấu hình công đoạn">
-               <Edit size={16} />
-             </Button>
-             
-             <Button onClick={toggleFullScreen} className="text-sm bg-slate-700 hover:bg-slate-600 border border-slate-600" title="Toàn màn hình">
-                {isFullscreen ? <Minimize size={16} /> : <Maximize size={16} />}
-             </Button>
-
-            <Button onClick={exportCSV} variant="success" className="text-sm">
-              <Download size={16} className="mr-1 inline" /> Excel
-            </Button>
-            <Button onClick={resetSession} variant="secondary" className="text-sm">
-              <RefreshCw size={16} className="mr-1 inline" /> Reset
-            </Button>
-          </div>
+          <p className="text-xs text-slate-500 font-medium uppercase tracking-wider">Thiết kế Layout</p>
         </div>
-      </header>
 
-      {/* STAGE SELECTOR BAR */}
-      <div className="bg-white border-b border-gray-200 shadow-sm sticky top-[72px] z-10">
-        <div className="w-full px-2 p-2 overflow-x-auto">
-           <div className="flex space-x-2 min-w-max">
-             {stages.map((stage) => {
-               const hasEmp = !!stageEmployees[stage.id];
-               return (
-               <button
-                 key={stage.id}
-                 onClick={() => handleStageChange(stage.id)}
-                 className={`flex items-center px-4 py-3 rounded-lg border-2 transition-all duration-200 font-bold text-sm ${
-                   currentStage === stage.id
-                     ? 'bg-blue-600 border-blue-600 text-white shadow-md scale-105'
-                     : 'bg-gray-50 border-gray-200 text-gray-500 hover:bg-gray-100 hover:border-gray-300'
-                 }`}
-               >
-                 <span className={`flex items-center justify-center w-6 h-6 rounded-full mr-2 text-xs border ${
-                    currentStage === stage.id ? 'bg-white text-blue-600 border-white' : hasEmp ? 'bg-green-500 text-white border-green-500' : 'bg-gray-300 text-white border-gray-300'
-                 }`}>
-                   {stage.id}
-                 </span>
-                 {stage.name}
-               </button>
-             )})}
-           </div>
-        </div>
-      </div>
+        <div className="px-4 py-2 border-b border-slate-100 min-w-[256px]">
+          <div className="relative">
+            <button 
+              onClick={() => setIsModelMenuOpen(!isModelMenuOpen)}
+              className="w-full flex items-center justify-between p-2 text-sm font-semibold bg-slate-50 rounded-lg hover:bg-slate-100 transition-colors"
+            >
+              <div className="flex items-center gap-2 overflow-hidden">
+                <FolderOpen className="w-4 h-4 text-indigo-600 flex-shrink-0" />
+                <span className="truncate">{currentModelName}</span>
+              </div>
+              <ChevronDown className={`w-4 h-4 transition-transform ${isModelMenuOpen ? 'rotate-180' : ''}`} />
+            </button>
 
-      {/* Main Content */}
-      <main className="flex-1 p-4 md:p-6 w-full grid grid-cols-1 lg:grid-cols-3 gap-6">
-          
-          {/* LEFT: INPUTS & STATS */}
-          <div className="lg:col-span-1 space-y-6">
-            
-            {/* Stats */}
-            <div className="grid grid-cols-3 gap-4">
-               <div className="col-span-3">
-                 <div className="bg-blue-600 text-white p-4 rounded-lg shadow-md">
-                    <h3 className="text-xs uppercase font-bold opacity-80 mb-1">Công đoạn đang chọn</h3>
-                    <div className="text-xl font-bold flex items-center gap-2">
-                       <Layers size={24} /> {currentStageObj?.name || `Stage ${currentStage}`}
-                    </div>
-                    {currentEmployeeId && (
-                       <div className="mt-2 text-sm bg-blue-700/50 p-1 px-2 rounded inline-block">
-                         NV: <b>{currentEmployeeId}</b>
-                       </div>
-                    )}
-                 </div>
-               </div>
-               <StatCard title="OK" value={stats.success} type="success" icon={<CheckCircle size={20} />} />
-               <StatCard title="NG" value={stats.defect} type="error" icon={<XCircle size={20} />} />
-               <StatCard title="System Err" value={stats.error} type="neutral" icon={<AlertOctagon size={20} />} />
-            </div>
-
-            {/* Scan Form */}
-            <div className="bg-white rounded-lg shadow-sm border border-gray-200">
-               <div className="p-4 bg-gray-50 border-b border-gray-200 font-bold text-gray-700 flex items-center gap-2">
-                 <ScanLine size={18} /> QUÉT MÃ
-               </div>
-               <div className="p-6 space-y-6">
-                  {/* Employee */}
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-600 mb-1">
-                      1. Nhân viên (Công đoạn {currentStage})
-                    </label>
-                    <div className="relative">
-                      <input
-                        ref={employeeInputRef}
-                        className={`w-full text-lg p-3 pl-10 border-2 rounded focus:outline-none ${currentEmployeeId ? 'border-green-300 bg-green-50 focus:border-green-500' : 'border-gray-300 focus:border-blue-500'}`}
-                        placeholder={currentEmployeeId ? "Đổi nhân viên..." : "Scan mã NV để bắt đầu..."}
-                        value={employeeInput}
-                        onChange={e => setEmployeeInput(e.target.value)}
-                        onKeyDown={handleEmployeeScan}
+            <AnimatePresence>
+              {isModelMenuOpen && (
+                <motion.div 
+                  initial={{ opacity: 0, y: -10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  className="absolute left-0 right-0 mt-2 bg-white border border-slate-200 rounded-xl shadow-xl z-50 max-h-64 overflow-y-auto"
+                >
+                  <div className="p-2 space-y-1">
+                    {Object.keys(models).map(name => (
+                      <div key={name} className="flex items-center justify-between group px-2 py-1.5 rounded-lg hover:bg-slate-50">
+                        {editingModelName === name ? (
+                          <div className="flex-1 flex items-center gap-1">
+                            <input 
+                              autoFocus
+                              type="text"
+                              value={tempModelName}
+                              onChange={(e) => setTempModelName(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') renameModel(name, tempModelName);
+                                if (e.key === 'Escape') setEditingModelName(null);
+                              }}
+                              className="flex-1 text-xs p-1 rounded border border-indigo-300 outline-none"
+                            />
+                            <button 
+                              onClick={() => renameModel(name, tempModelName)}
+                              className="p-1 text-green-600 hover:bg-green-50 rounded"
+                            >
+                              <Check className="w-3 h-3" />
+                            </button>
+                          </div>
+                        ) : (
+                          <>
+                            <button 
+                              onClick={() => loadModel(name)}
+                              className={`flex-1 text-left text-xs font-medium truncate ${currentModelName === name ? 'text-indigo-600' : 'text-slate-600'}`}
+                            >
+                              {name}
+                            </button>
+                            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-all">
+                              <button 
+                                onClick={() => {
+                                  setEditingModelName(name);
+                                  setTempModelName(name);
+                                }}
+                                className="p-1 text-slate-400 hover:text-indigo-600"
+                                title="Đổi tên"
+                              >
+                                <Pencil className="w-3 h-3" />
+                              </button>
+                              <button 
+                                onClick={() => duplicateModel(name)}
+                                className="p-1 text-slate-400 hover:text-indigo-600"
+                                title="Nhân bản"
+                              >
+                                <Copy className="w-3 h-3" />
+                              </button>
+                              {Object.keys(models).length > 1 && (
+                                <button 
+                                  onClick={() => deleteModel(name)}
+                                  className="p-1 text-slate-400 hover:text-red-500"
+                                  title="Xóa"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                </button>
+                              )}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="p-2 border-t border-slate-100 bg-slate-50">
+                    <div className="flex gap-1">
+                      <input 
+                        type="text" 
+                        placeholder="Tên model mới..."
+                        value={newModelName}
+                        onChange={(e) => setNewModelName(e.target.value)}
+                        className="flex-1 text-[10px] p-1.5 rounded border border-slate-200 outline-none"
                       />
-                      <Users className="absolute left-3 top-3.5 text-gray-400" size={20} />
-                      {currentEmployeeId && (
-                        <div className="absolute right-3 top-3.5 text-green-700 font-bold text-xs bg-green-200 px-2 py-0.5 rounded border border-green-300">
-                          {currentEmployeeId}
-                        </div>
-                      )}
+                      <button 
+                        onClick={saveNewModel}
+                        className="p-1.5 bg-indigo-600 text-white rounded hover:bg-indigo-700"
+                      >
+                        <FilePlus className="w-3 h-3" />
+                      </button>
                     </div>
                   </div>
-                  
-                  <hr className="border-gray-100"/>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        </div>
 
-                   {/* Defect Code Input */}
-                   <div className="bg-amber-50 p-3 rounded-md border border-amber-200">
-                    <label className="block text-sm font-bold text-amber-700 mb-1 flex items-center gap-2">
-                      <AlertTriangle size={14} />
-                      2. Mã Lỗi (Tùy chọn - Scan khi hàng NG)
-                    </label>
-                    <input
-                      ref={defectInputRef}
-                      className="w-full text-base p-2 border-2 border-amber-300 rounded focus:border-amber-500 focus:outline-none placeholder-amber-300/70"
-                      placeholder="Scan mã lỗi (Ví dụ: NG01)..."
-                      value={defectCode}
-                      onChange={e => setDefectCode(e.target.value)}
-                      onKeyDown={handleDefectScan}
+        <nav className="flex-1 p-4 space-y-6 overflow-y-auto min-w-[256px]">
+          <section>
+            <h2 className="text-xs font-semibold text-slate-400 uppercase mb-3 px-2">Thêm thiết bị</h2>
+            <div className="grid grid-cols-2 gap-2">
+              <button onClick={() => addElement('machine')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-slate-100 hover:border-indigo-200 hover:bg-indigo-50 transition-all group">
+                <Cpu className="w-6 h-6 text-slate-600 group-hover:text-indigo-600 mb-1" />
+                <span className="text-[10px] font-medium">Thiết bị</span>
+              </button>
+              <button onClick={() => addElement('conveyor')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-slate-100 hover:border-indigo-200 hover:bg-indigo-50 transition-all group">
+                <ArrowRightLeft className="w-6 h-6 text-slate-600 group-hover:text-indigo-600 mb-1" />
+                <span className="text-[10px] font-medium">Băng tải</span>
+              </button>
+              <button onClick={() => addElement('area')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-slate-100 hover:border-indigo-200 hover:bg-indigo-50 transition-all group">
+                <Factory className="w-6 h-6 text-slate-600 group-hover:text-indigo-600 mb-1" />
+                <span className="text-[10px] font-medium">Khu vực</span>
+              </button>
+              <button onClick={() => addElement('label')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-slate-100 hover:border-indigo-200 hover:bg-indigo-50 transition-all group">
+                <Plus className="w-6 h-6 text-slate-600 group-hover:text-indigo-600 mb-1" />
+                <span className="text-[10px] font-medium">Ghi chú</span>
+              </button>
+              <button onClick={() => addElement('arrow')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-slate-100 hover:border-indigo-200 hover:bg-indigo-50 transition-all group">
+                <ArrowRightLeft className="w-6 h-6 text-slate-600 group-hover:text-indigo-600 mb-1" />
+                <span className="text-[10px] font-medium">Mũi tên</span>
+              </button>
+              <button onClick={() => addElement('worker')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-slate-100 hover:border-indigo-200 hover:bg-indigo-50 transition-all group">
+                <User className="w-6 h-6 text-slate-600 group-hover:text-indigo-600 mb-1" />
+                <span className="text-[10px] font-medium">Công nhân</span>
+              </button>
+            </div>
+          </section>
+
+          {selectedElement && (
+            <motion.section 
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="bg-slate-50 p-4 rounded-2xl border border-slate-200"
+            >
+              <div className="flex justify-between items-center mb-3">
+                <h2 className="text-xs font-bold text-slate-700 uppercase">Cấu hình</h2>
+                <button onClick={deleteElement} className="text-red-500 hover:bg-red-50 p-1 rounded-md transition-colors">
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="space-y-3">
+                <div>
+                  <label className="text-[10px] text-slate-500 block mb-1">Tên thiết bị / Công nhân</label>
+                  <input 
+                    type="text" 
+                    value={selectedElement.name}
+                    onChange={(e) => updateElement(selectedElement.id, { name: e.target.value })}
+                    className="w-full text-sm p-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none"
+                  />
+                </div>
+                {selectedElement.type === 'worker' && (
+                  <div>
+                    <label className="text-[10px] text-slate-500 block mb-1">Công việc đảm nhận</label>
+                    <input 
+                      type="text" 
+                      value={selectedElement.task || ''}
+                      onChange={(e) => updateElement(selectedElement.id, { task: e.target.value })}
+                      className="w-full text-sm p-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none"
+                      placeholder="Ví dụ: Kiểm tra chất lượng..."
                     />
                   </div>
-
-                  <hr className="border-gray-100"/>
-
-                  {/* Measurement Input (CONDITIONAL) */}
-                  {currentStageObj?.enableMeasurement && (
-                    <div className="animate-in fade-in slide-in-from-top-2 duration-300 space-y-4">
-                      {/* Main Measurement */}
-                      <div>
-                        <label className="block text-sm font-bold text-purple-700 mb-1 flex items-center gap-2">
-                          <Activity size={18} className="text-purple-600"/>
-                          3. Nhập {currentStageObj.measurementLabel || "Giá trị đo"} (Bắt buộc)
-                        </label>
-                        <input
-                          ref={measurementInputRef}
-                          className="w-full text-lg p-3 border-2 border-purple-300 bg-purple-50 rounded focus:border-purple-500 focus:outline-none"
-                          placeholder={currentStageObj.measurementStandard ? `Nhập giá trị (Chuẩn: ${currentStageObj.measurementStandard})...` : `Nhập ${currentStageObj.measurementLabel || "giá trị"}...`}
-                          value={measurementValue}
-                          onChange={e => setMeasurementValue(e.target.value)}
-                          onKeyDown={handleMeasurementScan}
-                        />
-                      </div>
-
-                      {/* 8 Extra Fields (Grid) */}
-                      {activeExtraFields.length > 0 && (
-                        <div className="bg-gray-50 p-3 rounded border border-gray-200">
-                           <label className="block text-xs font-bold text-gray-500 mb-2 uppercase flex items-center gap-1">
-                             <List size={12}/> Thông số mở rộng
-                           </label>
-                           {/* Updated Grid for 8 items: 2 cols */}
-                           <div className="grid grid-cols-2 gap-3">
-                              {activeExtraFields.map((field) => (
-                                <div key={field.idx}>
-                                   <label className="block text-[10px] font-bold text-gray-500 mb-1 truncate" title={field.label}>
-                                      {field.label}
-                                   </label>
-                                   <input
-                                      ref={(el) => extraInputRefs.current[field.idx] = el}
-                                      value={additionalValues[field.idx]}
-                                      onChange={(e) => updateAdditionalValue(field.idx, e.target.value)}
-                                      onKeyDown={(e) => handleExtraInputScan(e, field.idx)}
-                                      className="w-full p-2 text-sm border border-gray-300 rounded focus:border-purple-500 focus:ring-1 focus:ring-purple-200 outline-none"
-                                      placeholder={currentStageObj.additionalFieldDefaults?.[field.idx] ? "(Mặc định)" : "..."}
-                                   />
-                                </div>
-                              ))}
-                           </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Product */}
+                )}
+                <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="block text-sm font-semibold text-gray-600 mb-1">
-                      {currentStageObj?.enableMeasurement ? "4" : "3"}. Mã IMEI máy (Enter)
-                    </label>
-                    <div className="relative">
-                      <input
-                        ref={productInputRef}
-                        disabled={errorModal.isOpen}
-                        className={`w-full text-xl font-mono p-4 pl-10 border-2 rounded shadow-inner focus:outline-none transition-colors
-                          ${errorModal.isOpen 
-                            ? 'bg-gray-100 cursor-not-allowed border-gray-300' 
-                            : defectCode 
-                              ? 'bg-amber-50 border-amber-500 ring-4 ring-amber-100'
-                              : 'bg-white border-blue-600 ring-4 ring-blue-50/50'}
-                        `}
-                        placeholder={
-                          !modelName ? "⚠️ Nhập Tên Model trước" :
-                          !currentModel ? "⚠️ Nhập Mã Kiểm Tra (IMEI)" :
-                          !currentEmployeeId ? "⚠️ Quét nhân viên trước" :
-                          defectCode ? "⚠️ SẮP GHI LỖI NG..." :
-                          "Sẵn sàng scan IMEI..."
-                        }
-                        value={productInput}
-                        onChange={e => setProductInput(e.target.value)}
-                        onKeyDown={handleProductScan}
+                    <label className="text-[10px] text-slate-500 block mb-1">Dài (mm)</label>
+                    <input 
+                      type="number" 
+                      value={Math.round(selectedElement.width * MM_PER_PX)}
+                      onChange={(e) => updateElement(selectedElement.id, { width: parseInt(e.target.value) / MM_PER_PX })}
+                      className="w-full text-sm p-2 rounded-lg border border-slate-200 outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-500 block mb-1">Rộng (mm)</label>
+                    <input 
+                      type="number" 
+                      value={Math.round(selectedElement.height * MM_PER_PX)}
+                      onChange={(e) => updateElement(selectedElement.id, { height: parseInt(e.target.value) / MM_PER_PX })}
+                      className="w-full text-sm p-2 rounded-lg border border-slate-200 outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-[10px] text-slate-500 block mb-1">Cỡ chữ</label>
+                    <input 
+                      type="number" 
+                      value={selectedElement.fontSize || 10}
+                      onChange={(e) => updateElement(selectedElement.id, { fontSize: parseInt(e.target.value) })}
+                      className="w-full text-sm p-2 rounded-lg border border-slate-200 outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-500 block mb-1">Xoay (độ)</label>
+                    <div className="flex gap-1">
+                      <input 
+                        type="number" 
+                        value={selectedElement.rotation || 0}
+                        onChange={(e) => updateElement(selectedElement.id, { rotation: parseInt(e.target.value) })}
+                        className="w-full text-sm p-2 rounded-lg border border-slate-200 outline-none"
                       />
-                      <Box className={`absolute left-3 top-1/2 -translate-y-1/2 ${currentEmployeeId && currentModel && modelName ? (defectCode ? 'text-amber-600' : 'text-blue-600') : 'text-gray-400'}`} size={24} />
+                      <button 
+                        onClick={() => updateElement(selectedElement.id, { rotation: ((selectedElement.rotation || 0) + 90) % 360 })}
+                        className="p-2 bg-slate-100 rounded-lg hover:bg-slate-200 transition-colors"
+                        title="Xoay 90°"
+                      >
+                        <RotateCw className="w-4 h-4 text-slate-600" />
+                      </button>
                     </div>
                   </div>
-               </div>
+                </div>
+                <div className="flex items-center gap-4">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input 
+                      type="checkbox" 
+                      checked={selectedElement.showCross}
+                      onChange={(e) => updateElement(selectedElement.id, { showCross: e.target.checked })}
+                      className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <span className="text-[10px] text-slate-500">Ký hiệu X</span>
+                  </label>
+                </div>
+              </div>
+            </motion.section>
+          )}
+          {selectedIds.length > 1 && (
+            <motion.section 
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="bg-slate-50 p-4 rounded-2xl border border-slate-200"
+            >
+              <div className="flex justify-between items-center mb-3">
+                <h2 className="text-xs font-bold text-slate-700 uppercase">Đã chọn {selectedIds.length} đối tượng</h2>
+                <button onClick={deleteElement} className="text-red-500 hover:bg-red-50 p-1 rounded-md transition-colors">
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+              <p className="text-[10px] text-slate-500 italic">Bạn có thể di chuyển hoặc xóa các đối tượng đã chọn cùng lúc.</p>
+            </motion.section>
+          )}
+        </nav>
+      </aside>
+
+      {/* Toggle Sidebar Button */}
+      <button 
+        onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+        className={`absolute top-1/2 -translate-y-1/2 z-30 bg-white border border-slate-200 p-1 rounded-full shadow-md hover:bg-slate-50 transition-all duration-300 ${isSidebarOpen ? 'left-[244px]' : 'left-2'}`}
+        title={isSidebarOpen ? "Ẩn thanh công cụ" : "Hiện thanh công cụ"}
+      >
+        <ChevronLeft className={`w-4 h-4 text-slate-600 transition-transform duration-300 ${isSidebarOpen ? '' : 'rotate-180'}`} />
+      </button>
+
+      {/* Main Content */}
+      <main className="flex-1 flex flex-col relative overflow-hidden">
+        {/* Header Toolbar */}
+        <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-6 z-10">
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2 text-sm font-medium text-slate-600">
+              <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+              Live Factory Mode
             </div>
           </div>
-
-          {/* RIGHT: HISTORY TABLE */}
-          <div className="lg:col-span-2 h-[calc(100vh-220px)] min-h-[500px]">
-            <div className="bg-white rounded-lg shadow-sm border border-gray-200 h-full flex flex-col">
-               <div className="p-4 border-b border-gray-200 bg-gray-50 flex justify-between items-center rounded-t-lg">
-                  <h3 className="font-bold text-gray-700">Lịch sử Scan</h3>
-                  <div className="text-xs flex gap-2">
-                    <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-green-500"></div> OK</span>
-                    <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-amber-500"></div> NG</span>
-                    <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-red-500"></div> Err</span>
-                  </div>
-               </div>
-               
-               <div className="flex-1 overflow-auto">
-                 <table className="w-full text-left text-sm">
-                   <thead className="bg-gray-100 text-gray-600 sticky top-0 z-0 shadow-sm">
-                     <tr>
-                       <th className="p-3 font-semibold border-b w-12">STT</th>
-                       <th className="p-3 font-semibold border-b">Mã IMEI máy</th>
-                       <th className="p-3 font-semibold border-b text-blue-700">Tên Model</th>
-                       <th className="p-3 font-semibold border-b">Công Đoạn</th>
-                       <th className="p-3 font-semibold border-b">Kết quả đo</th>
-                       <th className="p-3 font-semibold border-b">Tiến độ</th>
-                       <th className="p-3 font-semibold border-b">Nhân Viên</th>
-                       <th className="p-3 font-semibold border-b">Trạng Thái</th>
-                     </tr>
-                   </thead>
-                   <tbody className="divide-y divide-gray-100">
-                     {history.length === 0 ? (
-                       <tr><td colSpan={8} className="p-10 text-center text-gray-400">Chưa có dữ liệu</td></tr>
-                     ) : (
-                       history.map((row) => {
-                         const rowProgress = productProgress[row.productCode] || 0;
-                         const rowStageObj = stages.find(s => s.id === row.stage);
-                         const rowStageName = rowStageObj?.name || `Stage ${row.stage}`;
-                         
-                         let rowClass = "";
-                         if (row.status === 'valid') rowClass = "border-green-500 hover:bg-gray-50";
-                         else if (row.status === 'defect') rowClass = "border-amber-500 bg-amber-50 hover:bg-amber-100";
-                         else rowClass = "border-red-500 bg-red-50 hover:bg-red-100";
-                         
-                         // Helper to render extended values cleanly
-                         const renderExtended = () => {
-                           if (!row.additionalValues || row.additionalValues.every(v => !v)) return null;
-                           // Only show values that correspond to configured labels (if we can find the stage config)
-                           return (
-                             <div className="mt-1 flex flex-wrap gap-1">
-                               {row.additionalValues.map((v, i) => {
-                                 if (!v) return null;
-                                 const label = rowStageObj?.additionalFieldLabels?.[i];
-                                 return (
-                                   <span key={i} className="text-[10px] bg-purple-50 text-purple-700 px-1 rounded border border-purple-100 whitespace-nowrap">
-                                     {label ? `${label}: ` : ''}<b>{v}</b>
-                                   </span>
-                                 )
-                               })}
-                             </div>
-                           )
-                         };
-
-                         return (
-                           <tr key={row.id} className={`border-l-4 ${rowClass}`}>
-                             <td className="p-3 text-gray-500">{row.stt}</td>
-                             <td className={`p-3 font-mono font-medium ${row.status === 'error' ? 'text-red-700 line-through' : row.status === 'defect' ? 'text-amber-800' : 'text-blue-700'}`}>
-                               {row.productCode}
-                             </td>
-                             <td className="p-3 font-bold text-gray-700">
-                               {row.modelName || <span className="text-gray-300">-</span>}
-                             </td>
-                             <td className="p-3">
-                               <span className="bg-gray-100 px-2 py-1 rounded text-xs font-bold border border-gray-200 block truncate max-w-[150px]" title={rowStageName}>
-                                 {rowStageName}
-                               </span>
-                             </td>
-                             <td className="p-3">
-                                <div className="font-medium text-purple-700">{row.measurement || '-'}</div>
-                                {renderExtended()}
-                             </td>
-                             <td className="p-3">
-                               {(row.status === 'valid' || row.status === 'defect') && (
-                                 <div className="flex gap-1">
-                                    {[1,2,3,4,5].map(step => (
-                                      <div key={step} className={`w-2 h-4 rounded-sm ${step <= rowProgress ? 'bg-green-500' : 'bg-gray-200'}`} title={`Step ${step}`}/>
-                                    ))}
-                                 </div>
-                               )}
-                             </td>
-                             <td className="p-3 text-gray-900">{row.employeeId}</td>
-                             <td className="p-3">
-                               {row.status === 'valid' ? (
-                                 <div className="text-xs text-gray-500">
-                                   {format(new Date(row.timestamp), 'HH:mm:ss')}
-                                 </div>
-                               ) : row.status === 'defect' ? (
-                                  <span className="text-amber-700 font-bold text-xs flex items-center gap-1">
-                                   <XCircle size={12}/> {row.note}
-                                 </span>
-                               ) : (
-                                 <span className="text-red-600 font-bold text-xs flex items-center gap-1">
-                                   <AlertTriangle size={12}/> {row.note}
-                                 </span>
-                               )}
-                             </td>
-                           </tr>
-                         );
-                       })
-                     )}
-                   </tbody>
-                 </table>
-               </div>
-            </div>
+          <div className="flex items-center gap-2">
+            <button 
+              onClick={toggleFullscreen}
+              className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50 rounded-lg transition-colors"
+            >
+              {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+              {isFullscreen ? "Thoát toàn màn hình" : "Toàn màn hình"}
+            </button>
+            <button 
+              onClick={resetView}
+              className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50 rounded-lg transition-colors"
+            >
+              <Plus className="w-4 h-4 rotate-45" /> Reset View
+            </button>
+            <button 
+              onClick={undo}
+              disabled={history.length === 0}
+              className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50 rounded-lg transition-colors"
+            >
+              <ArrowRightLeft className="w-4 h-4 rotate-180" /> Hoàn tác (Ctrl+Z)
+            </button>
           </div>
+        </header>
+
+        {/* Canvas Area */}
+        <div className="flex-1 p-6 bg-slate-50 relative">
+          <Canvas 
+            layout={layout} 
+            onUpdateElement={updateElement} 
+            onUpdateElements={updateElements}
+            onSelectElements={setSelectedIds}
+            onUpdateViewport={updateViewport}
+            selectedIds={selectedIds}
+          />
+        </div>
       </main>
-
-      <ErrorModal isOpen={errorModal.isOpen} message={errorModal.message} onClose={handleCloseError} />
-
-      <StageSettingsModal 
-        isOpen={isSettingsOpen}
-        stages={stages}
-        onSave={setStages}
-        onClose={() => setIsSettingsOpen(false)}
-      />
     </div>
   );
 }
