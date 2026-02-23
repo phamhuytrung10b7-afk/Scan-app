@@ -1,5 +1,5 @@
 {
-  "name": "FactoryFlow AI",
-  "description": "Ứng dụng thiết kế và tối ưu hóa layout sản xuất thông minh tích hợp AI.",
+  "name": "ProScan Manufacturing Tracker",
+  "description": "Industrial barcode scanning application for manufacturing lines with employee tracking, model validation, and duplicate prevention.",
   "requestFramePermissions": []
 }
