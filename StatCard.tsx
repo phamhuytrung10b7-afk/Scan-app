@@ -3,25 +3,21 @@ import React from 'react';
 interface StatCardProps {
   title: string;
   value: string | number;
-  type: 'neutral' | 'success' | 'error';
-  icon?: React.ReactNode;
+  icon: React.ReactNode;
+  trend?: string;
+  colorClass?: string;
 }
 
-export const StatCard: React.FC<StatCardProps> = ({ title, value, type, icon }) => {
-  const colors = {
-    neutral: "bg-white border-gray-200 text-gray-800",
-    success: "bg-green-50 border-green-200 text-green-700",
-    error: "bg-red-50 border-red-200 text-red-700",
-  };
-
+export const StatCard: React.FC<StatCardProps> = ({ title, value, icon, trend, colorClass = "bg-white" }) => {
   return (
-    <div className={`p-6 rounded-lg border-2 shadow-sm flex flex-col justify-between h-full ${colors[type]}`}>
-      <div className="flex justify-between items-start mb-2">
-        <h3 className="text-sm font-bold uppercase tracking-wider opacity-80">{title}</h3>
-        {icon && <div className="opacity-80">{icon}</div>}
+    <div className={`${colorClass} p-6 rounded-xl shadow-sm border border-slate-100 flex items-start justify-between`}>
+      <div>
+        <p className="text-slate-500 text-sm font-medium mb-1">{title}</p>
+        <h3 className="text-2xl font-bold text-slate-800">{value}</h3>
+        {trend && <p className="text-xs text-green-600 mt-2 font-medium">{trend}</p>}
       </div>
-      <div className="text-4xl md:text-5xl font-bold truncate">
-        {value}
+      <div className="p-3 bg-slate-50 rounded-lg text-water-600">
+        {icon}
       </div>
     </div>
   );

@@ -1,47 +1,84 @@
-export interface ScanRecord {
+
+export enum UnitStatus {
+  NEW = 'NEW',
+  SOLD = 'SOLD',
+  WARRANTY = 'WARRANTY',
+  EXHIBITION = 'EXHIBITION'
+}
+
+export interface Product {
   id: string;
-  stt: number;
-  productCode: string;
-  model: string; // Used as validation prefix/pattern (Mã IMEI)
-  modelName?: string; // New field for the actual Model Name
-  employeeId: string;
-  timestamp: string; // ISO string
-  status: 'valid' | 'error' | 'defect'; // Added 'defect' for manufacturing errors (NG)
-  note?: string; 
-  stage: number; // The stage where this scan happened (1-5)
-  measurement?: string; // Recorded value (e.g. "12V", "PASS", "0.5kg")
-  additionalValues?: string[]; // Values for the 8 custom fields
+  model: string;
+  brand: string;
+  specs: string; 
 }
 
-export interface Stats {
-  success: number; // Count for current stage (OK)
-  defect: number;  // Count for manufacturing defects (NG)
-  error: number;   // System/Validation errors
-}
-
-export interface ErrorState {
-  isOpen: boolean;
-  message: string;
-}
-
-export interface Stage {
-  id: number;
+export interface Warehouse {
+  id: string;
   name: string;
-  // Removed isEnabled
-  enableMeasurement?: boolean; // Does this stage require a measurement?
-  measurementLabel?: string;   // Label for the measurement
-  measurementStandard?: string; // New: Standard value to compare against (e.g. "PASS", "OK")
-  additionalFieldLabels?: string[]; // Labels for 8 custom fields. Empty string = disabled.
-  additionalFieldDefaults?: string[]; // New: Default values for the 8 fields.
+  address?: string;
+  maxCapacity?: number; // Sức chứa tối đa (số lượng máy)
 }
 
-// Helper to create empty arrays of size 8
-const EMPTY_8 = Array(8).fill("");
+export interface Customer {
+  id: string;
+  name: string;
+  phone?: string;
+  type: 'DEALER' | 'RETAIL'; 
+}
 
-export const DEFAULT_PROCESS_STAGES: Stage[] = [
-  { id: 1, name: "Công đoạn 1: SMT / Lắp ráp", enableMeasurement: false, measurementLabel: "", additionalFieldLabels: [...EMPTY_8], additionalFieldDefaults: [...EMPTY_8] },
-  { id: 2, name: "Công đoạn 2: Kiểm tra ngoại quan", enableMeasurement: false, measurementLabel: "", additionalFieldLabels: [...EMPTY_8], additionalFieldDefaults: [...EMPTY_8] },
-  { id: 3, name: "Công đoạn 3: Function Test", enableMeasurement: true, measurementLabel: "Kết quả Test", measurementStandard: "PASS", additionalFieldLabels: [...EMPTY_8], additionalFieldDefaults: [...EMPTY_8] },
-  { id: 4, name: "Công đoạn 4: Đóng gói", enableMeasurement: false, measurementLabel: "", additionalFieldLabels: [...EMPTY_8], additionalFieldDefaults: [...EMPTY_8] },
-  { id: 5, name: "Công đoạn 5: OBA / Xuất xưởng", enableMeasurement: false, measurementLabel: "", additionalFieldLabels: [...EMPTY_8], additionalFieldDefaults: [...EMPTY_8] },
-];
+export interface SerialUnit {
+  serialNumber: string;
+  productId: string;
+  status: UnitStatus;
+  warehouseLocation: string; 
+  importDate: string;
+  exportDate?: string;
+  customerName?: string;
+  isReimported?: boolean; 
+}
+
+export interface Transaction {
+  id: string;
+  type: 'INBOUND' | 'OUTBOUND' | 'TRANSFER';
+  date: string;
+  productId: string;
+  quantity: number;
+  serialNumbers: string[];
+  fromLocation?: string; // Kho nguồn
+  toLocation?: string;   // Kho đích
+  customer?: string;   
+  isReimportTx?: boolean; 
+  planName?: string;    
+}
+
+export interface InventoryStats {
+  totalUnits: number;
+  lowStockModels: string[];
+  recentTransactions: Transaction[];
+}
+
+export interface ProductionPlan {
+  id: string;
+  name: string; 
+  productId: string; 
+  createdDate: string;
+  serials: string[]; 
+}
+
+export interface SalesOrderItem {
+  productId: string;
+  quantity: number;
+  scannedCount: number;
+}
+
+export interface SalesOrder {
+  id: string;
+  code: string;
+  type: 'SALE' | 'TRANSFER';
+  status: 'PENDING' | 'COMPLETED';
+  customerName?: string;
+  destinationWarehouse?: string;
+  createdDate: string;
+  items: SalesOrderItem[];
+}

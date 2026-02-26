@@ -1,5 +1,5 @@
 {
-  "name": "ProScan Manufacturing Tracker",
-  "description": "Industrial barcode scanning application for manufacturing lines with employee tracking, model validation, and duplicate prevention.",
+  "name": "RO-Master WMS VIP",
+  "description": "Specialized Warehouse Management System for RO Water Purifiers with IMEI tracking, inventory analytics, and AI-driven insights.",
   "requestFramePermissions": []
 }

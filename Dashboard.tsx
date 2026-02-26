@@ -1,58 +1,85 @@
 
-import React from 'react';
-import { AppSettings } from '../types';
-import { Settings } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { inventoryService } from './inventoryService';
+import { StatCard } from './StatCard';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { AlertTriangle, Box } from 'lucide-react';
+import { UnitStatus } from './types';
 
-interface DashboardProps {
-  settings: AppSettings;
-  validCount: number;
-  isFocused: boolean;
-  onOpenConfig: () => void;
-}
+export const Dashboard: React.FC = () => {
+  const [stats, setStats] = useState({
+    totalStock: 0,
+    outOfStockCount: 0,
+    activeAlerts: 0
+  });
+  const [chartData, setChartData] = useState<any[]>([]);
 
-export const Dashboard: React.FC<DashboardProps> = ({ settings, validCount, isFocused, onOpenConfig }) => {
+  useEffect(() => {
+    const products = inventoryService.getProducts();
+    const units = inventoryService.getUnits();
+    
+    const inStockUnits = units.filter(u => u.status === UnitStatus.NEW);
+    
+    let outOfStock = 0;
+    const data = products.map(p => {
+      const count = inStockUnits.filter(u => u.productId === p.id).length;
+      if (count === 0) outOfStock++;
+      return {
+        name: p.model,
+        stock: count
+      };
+    });
+
+    setStats({
+      totalStock: inStockUnits.length,
+      outOfStockCount: outOfStock,
+      activeAlerts: outOfStock
+    });
+
+    setChartData(data);
+
+  }, []);
+
   return (
-    <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-      {/* Scanner Status */}
-      <div className="bg-white rounded-xl shadow-sm p-6 border-l-8 border-indigo-500 flex flex-col justify-center">
-        <div className="flex items-center gap-3">
-          <div className={`w-4 h-4 rounded-full ${isFocused ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
-          <span className="text-sm font-black uppercase tracking-widest text-gray-500">
-            {isFocused ? 'System Ready' : 'Input Blocked'}
-          </span>
-        </div>
-        <p className="text-xs text-gray-400 mt-1">Scanner focus active</p>
-      </div>
-
-      {/* Target Model */}
-      <div className="bg-white rounded-xl shadow-sm p-6 border-l-8 border-blue-500">
-        <p className="text-gray-500 text-sm font-bold uppercase tracking-wider">Target Model</p>
-        <h2 className="text-3xl font-black text-blue-900 truncate">{settings.activeModel}</h2>
-      </div>
-      
-      {/* Counter */}
-      <div className="bg-white rounded-xl shadow-sm p-6 border-l-8 border-green-500">
-        <p className="text-gray-500 text-sm font-bold uppercase tracking-wider">Pass Count</p>
-        <div className="flex items-baseline gap-2">
-          <h2 className="text-5xl font-black text-green-700">{validCount}</h2>
-          <span className="text-gray-400 font-medium text-lg uppercase font-black">OK</span>
+    <div className="space-y-6">
+      <div className="flex flex-col md:flex-row justify-between md:items-center gap-4">
+        <div>
+          <h2 className="text-2xl font-bold text-slate-800">Tổng quan (Dashboard)</h2>
+          <p className="text-slate-500">Theo dõi tồn kho Máy lọc nước RO theo thời gian thực.</p>
         </div>
       </div>
 
-      {/* Station Info */}
-      <div className="bg-white rounded-xl shadow-sm p-6 border-l-8 border-gray-500">
-        <div className="flex justify-between items-start">
-          <div>
-            <p className="text-gray-500 text-sm font-bold uppercase tracking-wider">Station</p>
-            <h2 className="text-xl font-bold text-gray-800">{settings.operatorName}</h2>
-            <p className="text-xs text-gray-400 mt-1 font-bold">Shift: {settings.shift}</p>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <StatCard 
+          title="Tổng số máy tồn kho" 
+          value={stats.totalStock} 
+          icon={<Box />} 
+        />
+        <StatCard 
+          title="Model hết hàng" 
+          value={stats.outOfStockCount} 
+          icon={<AlertTriangle className="text-orange-500" />} 
+          colorClass="bg-orange-50 border-orange-100"
+        />
+      </div>
+
+      <div className="grid grid-cols-1 gap-6">
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
+          <h3 className="font-bold text-lg mb-4 text-slate-800">Tồn kho theo Model</h3>
+          <div className="h-96">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="name" axisLine={false} tickLine={false} />
+                <YAxis axisLine={false} tickLine={false} />
+                <Tooltip 
+                  cursor={{fill: '#f0f9ff'}}
+                  contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}}
+                />
+                <Bar dataKey="stock" name="Tồn hiện tại" fill="#0ea5e9" radius={[4, 4, 0, 0]} barSize={40} />
+              </BarChart>
+            </ResponsiveContainer>
           </div>
-          <button 
-            onClick={onOpenConfig}
-            className="p-2 hover:bg-gray-100 rounded-lg transition-colors border border-gray-100"
-          >
-            <Settings className="w-6 h-6 text-gray-400" />
-          </button>
         </div>
       </div>
     </div>

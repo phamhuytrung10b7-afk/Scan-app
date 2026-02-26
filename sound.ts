@@ -1,8 +1,10 @@
-// Utility to generate sounds using Web Audio API (No external assets required)
+
+// Simple audio synthesizer using Web Audio API
+// No external files required
 
 const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
 
-export const playSound = (type: 'success' | 'error') => {
+export const playSound = (type: 'success' | 'error' | 'warning') => {
   if (audioCtx.state === 'suspended') {
     audioCtx.resume();
   }
@@ -14,26 +16,29 @@ export const playSound = (type: 'success' | 'error') => {
   gainNode.connect(audioCtx.destination);
 
   if (type === 'success') {
-    // High pitch beep
+    // High pitch, short beep
     oscillator.type = 'sine';
-    oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // A5
-    oscillator.frequency.exponentialRampToValueAtTime(1760, audioCtx.currentTime + 0.1);
-    
+    oscillator.frequency.setValueAtTime(1000, audioCtx.currentTime);
     gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
-    gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.1);
+    oscillator.start();
+    oscillator.stop(audioCtx.currentTime + 0.1);
+  } else if (type === 'error') {
+    // Low pitch, longer buzz
+    oscillator.type = 'sawtooth';
+    oscillator.frequency.setValueAtTime(150, audioCtx.currentTime);
+    gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+    oscillator.start();
+    oscillator.stop(audioCtx.currentTime + 0.3);
+  } else if (type === 'warning') {
+    // Double beep
+    oscillator.type = 'square';
+    oscillator.frequency.setValueAtTime(400, audioCtx.currentTime);
+    gainNode.gain.setValueAtTime(0.05, audioCtx.currentTime);
     
     oscillator.start();
     oscillator.stop(audioCtx.currentTime + 0.1);
-  } else {
-    // Low pitch buzz
-    oscillator.type = 'sawtooth';
-    oscillator.frequency.setValueAtTime(150, audioCtx.currentTime);
-    oscillator.frequency.linearRampToValueAtTime(100, audioCtx.currentTime + 0.3);
-
-    gainNode.gain.setValueAtTime(0.2, audioCtx.currentTime);
-    gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
-
-    oscillator.start();
-    oscillator.stop(audioCtx.currentTime + 0.3);
+    
+    // We can't easily schedule a second oscillator in this simple function without managing nodes, 
+    // so a single distinct tone is used for warning.
   }
 };
