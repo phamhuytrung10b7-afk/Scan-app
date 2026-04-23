@@ -1,84 +1,105 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
-export enum UnitStatus {
-  NEW = 'NEW',
-  SOLD = 'SOLD',
-  WARRANTY = 'WARRANTY',
-  EXHIBITION = 'EXHIBITION'
-}
+export type StageId = 'LASER' | 'BENDING' | 'WELDING' | 'PAINTING' | 'DCLR';
 
-export interface Product {
-  id: string;
-  model: string;
-  brand: string;
-  specs: string; 
-}
-
-export interface Warehouse {
+export interface Part {
   id: string;
   name: string;
-  address?: string;
-  maxCapacity?: number; // Sức chứa tối đa (số lượng máy)
+  unit: string;
+  level?: number;
+  skipBending?: boolean;
+  skipWelding?: boolean;
 }
 
-export interface Customer {
-  id: string;
-  name: string;
-  phone?: string;
-  type: 'DEALER' | 'RETAIL'; 
-}
-
-export interface SerialUnit {
-  serialNumber: string;
-  productId: string;
-  status: UnitStatus;
-  warehouseLocation: string; 
-  importDate: string;
-  exportDate?: string;
-  customerName?: string;
-  isReimported?: boolean; 
+export interface InventoryItem {
+  partId: string;
+  stageId: StageId;
+  location: 'IN' | 'OUT';
+  quantity: number;
 }
 
 export interface Transaction {
   id: string;
-  type: 'INBOUND' | 'OUTBOUND' | 'TRANSFER';
-  date: string;
-  productId: string;
+  type: 'STAGE_OUT' | 'STAGE_IN';
+  partId: string;
   quantity: number;
-  serialNumbers: string[];
-  fromLocation?: string; // Kho nguồn
-  toLocation?: string;   // Kho đích
-  customer?: string;   
-  isReimportTx?: boolean; 
-  planName?: string;    
+  stageId: StageId;
+  timestamp: number;
+  qrData?: string;
+  sourceStageId?: StageId; // For STAGE_IN, where it came from
+  targetStageId?: StageId; // For STAGE_OUT, where it is intended to go
+  poId?: string; // Link to production order
 }
 
-export interface InventoryStats {
-  totalUnits: number;
-  lowStockModels: string[];
-  recentTransactions: Transaction[];
+export interface BOMDefinition {
+  parentPartId: string; // Level 3 part (Tôn tấm)
+  childPartId: string;  // Level 2 part (Linh kiện)
+  componentWeight: number; // KG of component per unit of child
+  scrapWeight: number;     // KG of scrap per unit of child
 }
 
-export interface ProductionPlan {
-  id: string;
-  name: string; 
-  productId: string; 
-  createdDate: string;
-  serials: string[]; 
+export interface BOMDefinitionV2 {
+  resultPartId: string;
+  ingredientPartId: string;
+  quantity: number; // Amount of ingredient per unit of result
 }
 
-export interface SalesOrderItem {
-  productId: string;
+export interface ModelBOMDefinition {
+  modelId: string;
+  partId: string; // Level 1 part
   quantity: number;
-  scannedCount: number;
 }
 
-export interface SalesOrder {
+export interface ProductionOrder {
   id: string;
-  code: string;
-  type: 'SALE' | 'TRANSFER';
-  status: 'PENDING' | 'COMPLETED';
-  customerName?: string;
-  destinationWarehouse?: string;
-  createdDate: string;
-  items: SalesOrderItem[];
+  masterPoId?: string; // Links to the top-level Model PO
+  partId: string;
+  stageId?: StageId; // Which stage this PO is for (null for Model PO)
+  targetQuantity: number;
+  producedQuantity: number;
+  exportedQuantity: number;
+  status: 'PENDING' | 'IN_PROGRESS' | 'COMPLETED';
+  createdAt: number;
+  expectedCompletionTime?: number;
 }
+
+export interface ProductivityNorm {
+  partId: string;
+  stageId: StageId;
+  secondsPerUnit: number; // Time in seconds to process 1 unit
+}
+
+export interface LaserNesting {
+  nestingId: string;
+  partId: string;
+  qtyPerSheet: number;
+  secondsPerUnit: number; // Time for this individual part
+  secondsPerSheet: number; // Total time for the full sheet
+}
+
+export interface BreakTime {
+  start: string; // HH:mm
+  end: string;   // HH:mm
+}
+
+export interface ShiftConfig {
+  stageId: StageId;
+  workerCount: number; // Number of people or parallel resources
+  shifts: {
+    start: string; // HH:mm
+    end: string;   // HH:mm
+  }[];
+  breaks: BreakTime[];
+}
+
+export const STAGES: { id: StageId; name: string; nextStageId?: StageId }[] = [
+  { id: 'LASER', name: 'Cắt Laser', nextStageId: 'BENDING' },
+  { id: 'BENDING', name: 'Chấn/Dập', nextStageId: 'WELDING' },
+  { id: 'WELDING', name: 'Hàn', nextStageId: 'PAINTING' },
+  { id: 'PAINTING', name: 'Sơn', nextStageId: 'DCLR' },
+];
+
+export const INITIAL_PARTS: Part[] = [];

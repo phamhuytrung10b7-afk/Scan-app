@@ -1,5 +1,5 @@
 {
-  "name": "Water Purifier Production Planner",
-  "description": "Automated production planning system for water purifier manufacturing, featuring BOM management, capacity calculation, and feasibility checks.",
+  "name": "WIP Inventory Manager",
+  "description": "Hệ thống quản lý tồn kho sản xuất (WIP) theo quy trình chuỗi cung ứng nội bộ, hỗ trợ nhập liệu và báo cáo tồn kho cơ bản.",
   "requestFramePermissions": []
 }
