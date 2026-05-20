@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import * as XLSX from 'xlsx';
 import { 
   LayoutDashboard, 
@@ -13,7 +13,8 @@ import {
   Settings,
   Edit2,
   Trash2,
-  ArrowRight, 
+  ArrowRight,
+  ArrowUpRight,
   CheckCircle2, 
   AlertCircle,
   Printer,
@@ -26,6 +27,7 @@ import {
   Monitor,
   Menu,
   FileUp,
+  Upload,
   Layers,
   Flame,
   FileText,
@@ -33,11 +35,15 @@ import {
   Clock,
   Save,
   Plus,
-  Users
+  Users,
+  FileSpreadsheet,
+  FileDown,
+  Square,
+  Check
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { QRCodeSVG } from 'qrcode.react';
-import { format } from 'date-fns';
+import { format, startOfDay } from 'date-fns';
 import { 
   BarChart, 
   Bar, 
@@ -52,7 +58,7 @@ import {
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
-import { STAGES, INITIAL_PARTS, StageId, Part, InventoryItem, Transaction, BOMDefinition, BOMDefinitionV2, ProductionOrder, ModelBOMDefinition, ProductivityNorm, LaserNesting, ShiftConfig } from './types';
+import { STAGES, INITIAL_PARTS, StageId, Part, InventoryItem, Transaction, BOMDefinition, BOMDefinitionV2, ProductionOrder, ModelBOMDefinition, ProductivityNorm, LaserNesting, ShiftConfig, PartTransformation, DEFECT_REASONS } from './types';
 import { storageService } from './storage';
 
 // Utility for tailwind classes
@@ -85,7 +91,7 @@ function getProcessValue(value: string | undefined, part: Part | undefined, stag
   return `${value} - ${suffix}`;
 }
 
-type View = 'dashboard' | 'produce' | 'inbound' | 'laser_inbound' | 'welding_inbound' | 'manual_inbound' | 'history' | 'settings' | 'labels' | 'po' | 'norms' | 'working_hours';
+type View = 'dashboard' | 'produce' | 'inbound' | 'laser_inbound' | 'welding_inbound' | 'manual_inbound' | 'history' | 'settings' | 'labels' | 'po' | 'norms' | 'working_hours' | 'defects' | 'glazing';
 
 function SearchableSelect({ 
   options, 
@@ -188,7 +194,9 @@ export default function App() {
   const [currentView, setCurrentView] = useState<View>('dashboard');
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [labels, setLabels] = useState<Transaction[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
+  const [productionOrders, setProductionOrders] = useState<ProductionOrder[]>([]);
   const [selectedStage, setSelectedStage] = useState<StageId>(STAGES[0].id);
   const [scanStage, setScanStage] = useState<StageId>(STAGES.find(s => s.id !== 'LASER')?.id || STAGES[0].id);
   const [selectedPart, setSelectedPart] = useState<string>('');
@@ -200,11 +208,70 @@ export default function App() {
   const [isImportingNorms, setIsImportingNorms] = useState(false);
 
   const [labelSettings, setLabelSettings] = useState(storageService.getLabelSettings());
+  const [defectModal, setDefectModal] = useState<{ partId: string, stageId: StageId, poId?: string } | null>(null);
 
   useEffect(() => {
-    // Initialize with some dummy data if empty
-    const existing = storageService.getInventory();
+    // Migration: ensure transformations use part IDs instead of part names
     const existingParts = storageService.getParts();
+    const transformations = storageService.getTransformations();
+    let migrated = false;
+    const stdSearch = (val: string) => val ? val.toUpperCase().normalize('NFC').trim() : '';
+
+    const newTransformations = transformations.map(t => {
+      let finalSource = t.sourcePartId;
+      let finalTarget = t.targetPartId;
+      
+      const ptSrc = existingParts.find(p => p.id === t.sourcePartId);
+      if (!ptSrc) {
+        const ptSrcByName = existingParts.find(p => stdSearch(p.name) === stdSearch(t.sourcePartId));
+        if (ptSrcByName) {
+          finalSource = ptSrcByName.id;
+          migrated = true;
+        }
+      }
+
+      const ptTgt = existingParts.find(p => p.id === t.targetPartId);
+      if (!ptTgt) {
+        const ptTgtByName = existingParts.find(p => stdSearch(p.name) === stdSearch(t.targetPartId));
+        if (ptTgtByName) {
+          finalTarget = ptTgtByName.id;
+          migrated = true;
+        }
+      }
+
+      return { ...t, sourcePartId: finalSource, targetPartId: finalTarget };
+    });
+
+    if (migrated) {
+      storageService.saveTransformations(newTransformations);
+    }
+    
+    // Migration: ensure inventory partIds match catalog case
+    const existingInv = storageService.getInventory();
+    let invMigrated = false;
+    const migratedInv = existingInv.map(i => {
+      let fPart = i.partId;
+      let fOrig = i.originalPartId;
+      const mPart = existingParts.find(p => p.id.toUpperCase() === i.partId.toUpperCase() || p.name.toUpperCase() === i.partId.toUpperCase());
+      if (mPart && i.partId !== mPart.id) {
+        fPart = mPart.id;
+        invMigrated = true;
+      }
+      if (i.originalPartId) {
+        const mOrig = existingParts.find(p => p.id.toUpperCase() === i.originalPartId?.toUpperCase() || p.name.toUpperCase() === i.originalPartId?.toUpperCase());
+        if (mOrig && i.originalPartId !== mOrig.id) {
+          fOrig = mOrig.id;
+          invMigrated = true;
+        }
+      }
+      return { ...i, partId: fPart, originalPartId: fOrig };
+    });
+    if (invMigrated) {
+      storageService.saveInventory(migratedInv);
+    }
+
+    // Initialize with some dummy data if empty
+    const existing = migratedInv;
     
     if (existingParts.length > 0 && !selectedPart) {
       setSelectedPart(existingParts[0].id);
@@ -216,6 +283,8 @@ export default function App() {
   const refreshData = () => {
     setInventory(storageService.getInventory());
     setTransactions(storageService.getTransactions());
+    setLabels(storageService.getLabels());
+    setProductionOrders(storageService.getProductionOrders());
     const currentParts = storageService.getParts();
     setParts(currentParts);
     if (currentParts.length > 0 && !selectedPart) {
@@ -232,13 +301,21 @@ export default function App() {
 
     try {
       const tx = storageService.recordStageOut(selectedPart, selectedStage, quantity, sourceLocation, targetStageId, poId);
+      
+      // Update inventory state immediately
+      const updatedInventory = storageService.getInventory();
+      setInventory(updatedInventory);
+      
       setLastTransaction(tx);
       const part = parts.find(p => p.id === selectedPart);
       const partName = getProcessValue(part?.name, part, selectedStage, 'OUT');
       const locationName = sourceLocation === 'IN' ? 'KHO_IN' : 'KHO_OUT';
       setSuccess(`Đã xuất từ ${locationName} ${quantity} ${partName} tại ${STAGES.find(s => s.id === selectedStage)?.name}`);
       setQuantity(0);
+      
       refreshData();
+
+      // Ensure we don't automatically trigger print, just show preview
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Đã xảy ra lỗi');
     }
@@ -275,9 +352,26 @@ export default function App() {
 
   const handlePrint = (label: Transaction) => {
     setLastTransaction(label);
+    if (label.id && !label.id.startsWith('QUICK-')) {
+      storageService.setTransactionPrinted(label.id, true);
+    }
+    refreshData();
+    // Auto trigger print when handlePrint is called (except from produce view form submit)
+    handlePrintConfirm();
+  };
+
+  const handlePreviewOnly = (label: Transaction) => {
+    setLastTransaction(label);
+    if (label.id && !label.id.startsWith('QUICK-')) {
+      storageService.setTransactionPrinted(label.id, true);
+    }
+    refreshData();
+  };
+
+  const handlePrintConfirm = () => {
     setTimeout(() => {
       window.print();
-    }, 500);
+    }, 200);
   };
 
   const copyToClipboard = (text: string) => {
@@ -323,129 +417,217 @@ export default function App() {
       {/* Hidden Print Area */}
       <div id="print-area" className="hidden print:block">
         {lastTransaction && (
-          <div className="w-full h-full bg-white text-black flex flex-col items-center p-4 box-border border-2 border-black">
-            {/* QR Code Section */}
-            <div className="mb-4 border-2 border-black p-1">
-              <QRCodeSVG value={lastTransaction.qrData || ''} size={labelSettings.qrSize * 1.8} level="H" />
-            </div>
-
-            {/* Part Name & ID */}
-            <div className="text-center w-full mb-3">
-              <h1 className="font-black uppercase leading-tight" style={{ fontSize: `${labelSettings.qrSize / 6}px` }}>
-                {getProcessValue(parts.find(p => p.id === lastTransaction.partId)?.name, parts.find(p => p.id === lastTransaction.partId), lastTransaction.stageId, 'OUT')}
-              </h1>
-              <p className="font-mono font-bold mt-1" style={{ fontSize: `${labelSettings.fontSize}px` }}>
-                Mã LK: {getProcessValue(lastTransaction.partId, parts.find(p => p.id === lastTransaction.partId), lastTransaction.stageId, 'OUT')}
-              </p>
-            </div>
-
-            {/* Quantity & Source Stage */}
-            <div className="grid grid-cols-2 w-full border-t-2 border-b-2 border-black py-3 mb-3">
-              <div className="flex flex-col items-center border-r-2 border-black">
-                <span className="text-[10px] font-bold uppercase opacity-60 mb-1">Số lượng:</span>
-                <span className="font-black" style={{ fontSize: `${labelSettings.fontSize + 12}px` }}>
-                  {lastTransaction.quantity} {parts.find(p => p.id === lastTransaction.partId)?.unit}
-                </span>
+          lastTransaction.type === 'DISPOSAL' ? (
+            <div className="w-full h-full bg-white text-black flex flex-col items-center p-4 box-border border-4 border-black border-dashed">
+              {/* NG Watermark */}
+              <div className="absolute inset-0 flex items-center justify-center opacity-10 pointer-events-none overflow-hidden">
+                <span className="text-[120px] font-black rotate-45 whitespace-nowrap">NG - HỦY - NG</span>
               </div>
-              <div className="flex flex-col items-center">
-                <span className="text-[10px] font-bold uppercase opacity-60 mb-1">Từ công đoạn:</span>
-                <span className="font-black uppercase text-center" style={{ fontSize: `${labelSettings.fontSize + 4}px` }}>
-                  {STAGES.find(s => s.id === lastTransaction.stageId)?.name}
-                </span>
+
+              {/* Top NG bar */}
+              <div className="w-full bg-black text-white text-center py-2 mb-4 font-black text-xl tracking-tighter">
+                NHÃN XUẤT HỦY (DISPOSAL ONLY)
+              </div>
+
+              {/* QR Code Section */}
+              <div className="mb-4 border-2 border-black p-1 bg-white relative z-10">
+                <QRCodeSVG value={lastTransaction.qrData || ''} size={labelSettings.qrSize * 1.8} level="H" />
+              </div>
+
+              {/* Part Name & ID */}
+              <div className="text-center w-full mb-3 relative z-10 text-black px-2">
+                <h1 className="font-black uppercase leading-tight text-balance break-words" style={{ fontSize: `${labelSettings.fontSize + 6}px` }}>
+                  {parts.find(p => p.id === lastTransaction.partId)?.name || lastTransaction.partId}
+                </h1>
+                <p className="font-mono font-black mt-1 text-black break-words" style={{ fontSize: `${labelSettings.fontSize + 4}px` }}>
+                  Mã LK: {lastTransaction.partId}
+                </p>
+              </div>
+
+              {/* Quantity & Source Stage */}
+              <div className="grid grid-cols-2 w-full border-t-2 border-b-2 border-black py-4 mb-4 relative z-10 text-black">
+                <div className="flex flex-col items-center border-r-2 border-black">
+                  <span className="text-[10px] font-black uppercase mb-1 text-black">Số lượng:</span>
+                  <span className="font-black text-black" style={{ fontSize: `${labelSettings.fontSize + 10}px` }}>
+                    {lastTransaction.quantity} {parts.find(p => p.id === lastTransaction.partId)?.unit}
+                  </span>
+                </div>
+                <div className="flex flex-col items-center text-black">
+                  <span className="text-[10px] font-black uppercase mb-1 text-black">Từ kho:</span>
+                  <span className="font-black uppercase text-center leading-none text-black" style={{ fontSize: `${labelSettings.fontSize + 6}px` }}>
+                    {STAGES.find(s => s.id === lastTransaction.stageId)?.name} (NG)
+                  </span>
+                </div>
+              </div>
+
+              {/* Warnings */}
+              <div className="w-full border-2 border-black rounded-lg p-2 mb-3 text-center bg-transparent text-black">
+                <span className="text-sm font-black uppercase block text-black">HÀNG KHÔNG ĐẠT (NG)</span>
+                <span className="text-[10px] font-black block text-black">CẤM NHẬP KHO - CHỜ TIÊU HỦY</span>
+              </div>
+
+              {/* Footer */}
+              <div className="mt-auto w-full justify-between items-end font-mono border-t border-black pt-2 pb-1 hidden" style={{ fontSize: `${labelSettings.fontSize - 6}px` }}>
+                <div className="flex flex-col leading-tight">
+                  <span className="font-bold">TX ID: {lastTransaction.id}</span>
+                  <span>Thời gian: {format(lastTransaction.timestamp, 'dd/MM/yyyy HH:mm:ss')}</span>
+                </div>
+                <div className="font-black italic bg-black text-white px-2 py-0.5">
+                  DISPOSAL
+                </div>
               </div>
             </div>
-
-            {/* Route / Destination */}
-            <div className="w-full border-2 border-black rounded p-2 mb-3 text-center">
-              <span className="text-[10px] font-bold uppercase opacity-60 block mb-1">Đích tiếp theo:</span>
-              <div className="flex items-center justify-center gap-4 font-black italic" style={{ fontSize: `${labelSettings.fontSize + 2}px` }}>
-                <span className="uppercase">{STAGES.find(s => s.id === lastTransaction.stageId)?.name}</span>
-                <span className="text-xl">→</span>
-                <span className="uppercase">
-                  {STAGES.find(s => s.id === (lastTransaction.targetStageId || lastTransaction.qrData?.split('|')?.[5]))?.name || 
-                   ((lastTransaction.targetStageId || lastTransaction.qrData?.split('|')?.[5]) === 'DCLR' ? 'Lắp ráp (DCLR)' : 'KẾ THÚC')}
-                </span>
+          ) : (
+            <div className="w-full h-full bg-white text-black flex flex-col p-2 box-border">
+              <div className="w-full text-center pb-1">
+                <h1 className="font-black uppercase tracking-tight" style={{ fontSize: `${labelSettings.fontSize + 2}px` }}>PHIẾU ĐIỀU CHUYỂN</h1>
               </div>
-            </div>
+              <div className="flex-1 w-full border-2 border-black flex flex-col items-center p-2">
+              {/* QR Code Section */}
+              <div className="mt-1 mb-2 border-2 border-black p-1">
+                <QRCodeSVG value={lastTransaction.qrData || ''} size={labelSettings.qrSize * 1.8} level="H" />
+              </div>
 
-            {/* PO Details Section (NEW) */}
-            <div className="w-full space-y-1 mb-4 text-[11px] font-bold border border-black/20 p-2 rounded">
-              <div className="flex justify-between items-center">
-                <span className="opacity-50 uppercase">LOẠI PO:</span>
+              {/* Part Name & ID */}
+              <div className="text-center w-full mb-3 px-2">
+                <h1 className="font-black uppercase leading-tight text-balance break-words" style={{ fontSize: `${labelSettings.fontSize + 6}px` }}>
+                  {lastTransaction.partName || getProcessValue(parts.find(p => p.id === lastTransaction.partId)?.name, parts.find(p => p.id === lastTransaction.partId), lastTransaction.stageId, 'OUT')}
+                </h1>
+                <p className="font-mono font-black mt-1 text-black break-words" style={{ fontSize: `${labelSettings.fontSize + 4}px` }}>
+                  Mã LK: {lastTransaction.id?.startsWith('QUICK-') ? lastTransaction.partId : (lastTransaction.partId)}
+                </p>
+              </div>
+
+              {/* Quantity & Source Stage */}
+              <div className="grid grid-cols-2 w-full border-t-2 border-b-2 border-black py-3 mb-3 text-black">
+                <div className="flex flex-col items-center border-r-2 border-black">
+                  <span className="text-[10px] font-black uppercase mb-1">Số lượng:</span>
+                  <span className="font-black" style={{ fontSize: `${labelSettings.fontSize + 10}px` }}>
+                    {lastTransaction.quantity} {parts.find(p => p.id === lastTransaction.partId)?.unit}
+                  </span>
+                </div>
+                <div className="flex flex-col items-center">
+                  <span className="text-[10px] font-black uppercase mb-1">Từ công đoạn:</span>
+                  <span className="font-black uppercase text-center" style={{ fontSize: `${labelSettings.fontSize + 6}px` }}>
+                    {STAGES.find(s => s.id === lastTransaction.stageId)?.name}
+                  </span>
+                </div>
+              </div>
+
+              {/* Route / Destination */}
+              <div className="w-full border-2 border-black rounded p-2 mb-3 text-center text-black">
+                <span className="text-[10px] font-black uppercase block mb-1">Đích tiếp theo:</span>
+                <div className="flex items-center justify-center gap-4 font-black italic" style={{ fontSize: `${labelSettings.fontSize + 6}px` }}>
+                  <span className="uppercase">{STAGES.find(s => s.id === lastTransaction.stageId)?.name}</span>
+                  <span className="text-xl">→</span>
+                  <span className="uppercase">
+                    {STAGES.find(s => s.id === (lastTransaction.targetStageId || lastTransaction.qrData?.split('|')?.[5]))?.name || 
+                     ((lastTransaction.targetStageId || lastTransaction.qrData?.split('|')?.[5]) === 'DCLR' ? 'Lắp ráp (DCLR)' : 'KẾ THÚC')}
+                  </span>
+                </div>
+              </div>
+              
+              {/* Optional Glazing Times */}
+              {(lastTransaction as any).planId && (() => {
+                const plan = storageService.getGlazingPlans().find(p => p.id === (lastTransaction as any).planId);
+                if (plan) {
+                  return (
+                    <div className="w-full flex justify-between font-mono font-bold text-black border-t border-b border-black py-2 mb-2" style={{ fontSize: `${labelSettings.fontSize + 2}px` }}>
+                       <div className="flex flex-col text-left">
+                         <span className="text-[14px] uppercase font-black">HT Dự Kiến</span>
+                         <span>{plan.expectedCompletionTime ? format(plan.expectedCompletionTime, 'HH:mm dd/MM') : '--:--'}</span>
+                       </div>
+                       <div className="flex flex-col text-right">
+                         <span className="text-[14px] uppercase font-black">HT Thực Tế</span>
+                         <span>{format(lastTransaction.timestamp, 'HH:mm dd/MM')}</span>
+                       </div>
+                    </div>
+                  );
+                }
+                return null;
+              })()}
+
+              {/* PO Details Section (NEW) */}
+              <div className="mb-2 w-full space-y-1 text-[11px] font-black border-2 border-black p-2 rounded text-black">
+                <div className="flex justify-between items-center">
+                  <span className="uppercase">LOẠI PO:</span>
+                  {(() => {
+                    const po = storageService.getProductionOrders().find(p => p.id === lastTransaction.poId);
+                    return (
+                      <span className="text-[9px] uppercase font-black">
+                        {po?.masterPoId ? 'PO Con (Sub)' : 'PO Tổng (Master)'}
+                      </span>
+                    );
+                  })()}
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="uppercase">MÃ PO:</span>
+                  <span className="font-mono font-black">{lastTransaction.poId || 'N/A'}</span>
+                </div>
+                <div className="flex justify-between items-center text-[10px] italic font-black">
+                  <span>Kế hoạch PO Con:</span>
+                  <span>{lastTransaction.qrData?.split('|')?.[8] || storageService.getProductionOrders().find(p => p.id === lastTransaction.poId)?.targetQuantity || 0} linh kiện</span>
+                </div>
                 {(() => {
                   const po = storageService.getProductionOrders().find(p => p.id === lastTransaction.poId);
+                  const masterId = po?.masterPoId || lastTransaction.qrData?.split('|')?.[7];
                   return (
-                    <span className="text-[9px] uppercase">
-                      {po?.masterPoId ? 'PO Con (Sub)' : 'PO Tổng (Master)'}
-                    </span>
+                    <>
+                      {po?.plannedStartTime && (
+                        <div className="flex justify-between items-center pt-1 border-t border-black">
+                          <span className="uppercase">KH Bắt đầu PO:</span>
+                          <span className="font-mono font-black">{format(po.plannedStartTime, 'dd/MM HH:mm')}</span>
+                        </div>
+                      )}
+                      {po?.expectedCompletionTime && (
+                        <div className="flex justify-between items-center">
+                          <span className="uppercase">KH Kết thúc PO:</span>
+                          <span className="font-mono font-black">{format(po.expectedCompletionTime, 'dd/MM HH:mm')}</span>
+                        </div>
+                      )}
+                      {masterId && (
+                        <>
+                          <div className="flex justify-between items-center pt-1 border-t border-black">
+                            <span className="uppercase font-black text-black">PO TỔNG:</span>
+                            <span className="font-mono font-black text-black">{masterId}</span>
+                          </div>
+                          <div className="flex justify-between items-center text-[10px] italic font-black text-black">
+                            <span>Kế hoạch PO Tổng:</span>
+                            <span>{lastTransaction.qrData?.split('|')?.[9] || storageService.getProductionOrders().find(p => p.id === masterId)?.targetQuantity || 0} máy</span>
+                          </div>
+                        </>
+                      )}
+                    </>
                   );
                 })()}
+                <div className="flex justify-between items-center pt-1 border-t border-black">
+                  <span className="uppercase text-[9px]">Hoàn thành thực tế:</span>
+                  <span className="font-mono font-black">{format(lastTransaction.timestamp, 'dd/MM/yyyy HH:mm:ss')}</span>
+                </div>
               </div>
-              <div className="flex justify-between items-center">
-                <span className="opacity-50 uppercase">MÃ PO:</span>
-                <span className="font-mono">{lastTransaction.poId || 'N/A'}</span>
-              </div>
-              <div className="flex justify-between items-center text-[9px] text-gray-500 italic">
-                <span>Kế hoạch PO Con:</span>
-                <span>{lastTransaction.qrData?.split('|')?.[8] || storageService.getProductionOrders().find(p => p.id === lastTransaction.poId)?.targetQuantity || 0} linh kiện</span>
-              </div>
-              {(() => {
-                const po = storageService.getProductionOrders().find(p => p.id === lastTransaction.poId);
-                const masterId = po?.masterPoId || lastTransaction.qrData?.split('|')?.[7];
-                return masterId && (
-                  <>
-                    <div className="flex justify-between items-center">
-                      <span className="opacity-50 uppercase">PO TỔNG:</span>
-                      <span className="font-mono">{masterId}</span>
-                    </div>
-                    <div className="flex justify-between items-center text-[9px] text-gray-500 italic">
-                      <span>Kế hoạch PO Tổng:</span>
-                      <span>{lastTransaction.qrData?.split('|')?.[9] || storageService.getProductionOrders().find(p => p.id === masterId)?.targetQuantity || 0} máy</span>
-                    </div>
-                  </>
-                );
-              })()}
-              <div className="flex justify-between items-center pt-1 border-t border-black/5">
-                <span className="opacity-50 uppercase">Bắt đầu đi:</span>
-                <span className="font-mono">{format(lastTransaction.timestamp, 'HH:mm:ss')}</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="opacity-50 uppercase">Đến dự kiến:</span>
-                <span className="font-mono">{format(lastTransaction.timestamp, 'HH:mm:ss')}</span>
-              </div>
-            </div>
 
-            {/* Footer: ID & Time */}
-            <div className="mt-auto w-full flex justify-between items-end font-mono border-t border-black pt-2" style={{ fontSize: `${labelSettings.fontSize - 6}px` }}>
-              <div className="flex flex-col leading-tight">
-                <span className="font-bold">ID: {lastTransaction.id}</span>
-                <span>Thời gian: {format(lastTransaction.timestamp, 'dd/MM/yyyy HH:mm:ss')}</span>
+              {/* Footer: ID & Time */}
+              <div className="mt-auto w-full justify-between items-end font-mono border-t border-black pt-2 hidden" style={{ fontSize: `${labelSettings.fontSize - 6}px` }}>
+                <div className="flex flex-col leading-tight">
+                  <span className="font-bold">ID: {lastTransaction.id}</span>
+                  <span>Thời gian: {format(lastTransaction.timestamp, 'dd/MM/yyyy HH:mm:ss')}</span>
+                </div>
+                <div className="font-black italic">
+                  WIP TRACKING
+                </div>
               </div>
-              <div className="font-black italic">
-                WIP TRACKING
               </div>
             </div>
-          </div>
+          )
         )}
       </div>
+
       {/* Sidebar */}
       <aside className={cn(
         "bg-white border-r border-gray-200 transition-all duration-300 flex flex-col z-50",
         isSidebarOpen ? "w-64" : "w-20"
       )}>
-        <div className="p-6 flex items-center gap-3 border-b border-gray-100">
-          <div className="bg-[#F27D26] p-3 rounded-lg">
-            <Package size={28} className="text-white" />
-          </div>
-          {isSidebarOpen && (
-            <div className="flex flex-col">
-              <span className="font-mono text-lg font-bold tracking-tighter italic leading-none text-gray-900">WIP.SYSTEM</span>
-              <span className="text-xs font-mono opacity-80 uppercase tracking-widest mt-1 text-gray-700">Desktop v2.0</span>
-            </div>
-          )}
-        </div>
-
-        <nav className="flex-1 p-4 space-y-3">
+        <nav className="flex-1 pt-2 px-3 space-y-1">
           <SidebarLink 
             active={currentView === 'dashboard'} 
             onClick={() => setCurrentView('dashboard')}
@@ -482,6 +664,13 @@ export default function App() {
             collapsed={!isSidebarOpen}
           />
           <SidebarLink 
+            active={currentView === 'glazing'} 
+            onClick={() => setCurrentView('glazing')}
+            icon={<Square size={24} />}
+            label="Công đoạn Dán Kính"
+            collapsed={!isSidebarOpen}
+          />
+          <SidebarLink 
             active={currentView === 'labels'} 
             onClick={() => setCurrentView('labels')}
             icon={<QrCode size={24} />}
@@ -493,6 +682,13 @@ export default function App() {
             onClick={() => setCurrentView('po')}
             icon={<ClipboardList size={24} />}
             label="Lệnh sản xuất (PO)"
+            collapsed={!isSidebarOpen}
+          />
+          <SidebarLink 
+            active={currentView === 'defects'} 
+            onClick={() => setCurrentView('defects')}
+            icon={<AlertCircle size={24} className="text-red-500" />}
+            label="Báo cáo lỗi (Defect)"
             collapsed={!isSidebarOpen}
           />
           <SidebarLink 
@@ -545,7 +741,7 @@ export default function App() {
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Top Header */}
-        <header className="bg-white border-b border-gray-200 p-6 flex justify-between items-center shadow-sm z-40">
+        <header className="bg-white border-b border-gray-200 py-3 px-6 flex justify-between items-center shadow-sm z-40">
           <div className="flex items-center gap-4">
             <h2 className="font-bold text-2xl uppercase tracking-tight">
               {currentView === 'dashboard' && 'Báo cáo tồn kho WIP'}
@@ -580,7 +776,7 @@ export default function App() {
           <div className="w-full max-w-[1600px] mx-auto">
             <AnimatePresence mode="wait">
               {currentView === 'dashboard' && (
-                <DashboardView key="dashboard" inventory={inventory} parts={parts} refreshData={refreshData} />
+                <DashboardView key="dashboard" transactions={transactions} inventory={inventory} parts={parts} refreshData={refreshData} setDefectModal={setDefectModal} />
               )}
               {currentView === 'produce' && (
                 <ProduceView 
@@ -595,9 +791,12 @@ export default function App() {
                   lastTransaction={lastTransaction}
                   setLastTransaction={setLastTransaction}
                   inventory={inventory}
+                  productionOrders={productionOrders}
                   parts={parts}
                   onPrint={handlePrint}
                   onCopy={copyToClipboard}
+                  setDefectModal={setDefectModal}
+                  labelSettings={labelSettings}
                 />
               )}
               {currentView === 'inbound' && (
@@ -607,6 +806,7 @@ export default function App() {
                   setSelectedStage={setScanStage}
                   onScanSuccess={onScanSuccess}
                   parts={parts}
+                  setDefectModal={setDefectModal}
                 />
               )}
               {currentView === 'laser_inbound' && (
@@ -614,6 +814,8 @@ export default function App() {
                   key="laser_inbound"
                   parts={parts}
                   onManualInbound={handleManualInbound}
+                  setDefectModal={setDefectModal}
+                  productionOrders={productionOrders}
                 />
               )}
               {currentView === 'welding_inbound' && (
@@ -621,6 +823,20 @@ export default function App() {
                   key="welding_inbound"
                   parts={parts}
                   onManualInbound={handleManualInbound}
+                  setDefectModal={setDefectModal}
+                  productionOrders={productionOrders}
+                />
+              )}
+              {currentView === 'glazing' && (
+                <GlazingView 
+                  key="glazing"
+                  parts={parts}
+                  inventory={inventory}
+                  onManualInbound={handleManualInbound}
+                  setDefectModal={setDefectModal}
+                  refreshData={refreshData}
+                  labels={labels}
+                  onPrint={handlePrint}
                 />
               )}
               {currentView === 'manual_inbound' && (
@@ -628,20 +844,31 @@ export default function App() {
                   key="manual_inbound"
                   parts={parts}
                   onManualInbound={handleManualInbound}
+                  setDefectModal={setDefectModal}
+                  productionOrders={productionOrders}
                 />
               )}
               {currentView === 'labels' && (
                 <LabelHistoryView 
                   key="labels" 
                   parts={parts} 
+                  labels={labels}
                   onPrint={handlePrint}
                   onCopy={copyToClipboard}
                   onRollback={refreshData}
                   onManualInboundQR={(qr, stage) => onScanSuccess(qr, 'IN', stage)}
+                  labelSettings={labelSettings}
                 />
               )}
               {currentView === 'po' && (
-                <ProductionOrderView parts={parts} />
+                <ProductionOrderView 
+                  parts={parts} 
+                  onUpdate={refreshData} 
+                  productionOrders={productionOrders} 
+                />
+              )}
+              {currentView === 'defects' && (
+                <DefectView key="defects" parts={parts} transactions={transactions} inventory={inventory} refreshData={refreshData} setLastTransaction={setLastTransaction} />
               )}
               {currentView === 'norms' && (
                 <NormsView parts={parts} onNormsChange={refreshData} />
@@ -680,6 +907,20 @@ export default function App() {
           </div>
         </footer>
       </div>
+
+
+      {/* Defect Modal */}
+      {defectModal && (
+        <DefectModal 
+          data={defectModal} 
+          inventory={inventory}
+          onClose={() => setDefectModal(null)} 
+          onDefectRecorded={() => {
+            setSuccess('Đã ghi nhận hàng lỗi thành công!');
+            refreshData();
+          }} 
+        />
+      )}
 
       {/* Notification Overlay */}
       <AnimatePresence>
@@ -736,21 +977,42 @@ function SidebarLink({ active, onClick, icon, label, collapsed }: { active: bool
 interface DashboardProps {
   inventory: InventoryItem[];
   parts: Part[];
+  transactions: Transaction[];
   refreshData: () => void;
   key?: string;
 }
 
-function ProductionOrderView({ parts }: { parts: Part[] }) {
-  const [orders, setOrders] = useState<ProductionOrder[]>([]);
+function ProductionOrderView({ parts, onUpdate, productionOrders }: { parts: Part[], onUpdate: () => void, productionOrders: ProductionOrder[] }) {
+  const [orders, setOrders] = useState<ProductionOrder[]>(productionOrders);
+  const [activeTab, setActiveTab] = useState<'STANDARD' | 'REPAIR'>('STANDARD');
   const [selectedPart, setSelectedPart] = useState("");
   const [quantity, setQuantity] = useState(0);
+  const [targetCompletion, setTargetCompletion] = useState("");
+  const [searchTerm, setSearchTerm] = useState("");
+  const [estimatedStart, setEstimatedStart] = useState<number | null>(null);
   const [showDeleteModal, setShowDeleteModal] = useState<string | null>(null);
+  const [showEditModal, setShowEditModal] = useState<{ id: string, qty: number } | null>(null);
   const [password, setPassword] = useState("");
   const [expandedMasterPos, setExpandedMasterPos] = useState<Set<string>>(new Set());
 
   useEffect(() => {
-    setOrders(storageService.getProductionOrders());
+    setOrders(productionOrders);
+  }, [productionOrders]);
+
+  useEffect(() => {
+    setTargetCompletion(format(new Date(), "yyyy-MM-dd'T'HH:mm"));
   }, []);
+
+  // Update estimatedStart directly based on storageService calculation
+  useEffect(() => {
+    if (selectedPart && quantity > 0 && targetCompletion) {
+      const endTs = new Date(targetCompletion).getTime();
+      const calculatedStartTs = storageService.previewMasterPOStart(selectedPart, quantity, endTs);
+      setEstimatedStart(calculatedStartTs);
+    } else {
+      setEstimatedStart(null);
+    }
+  }, [selectedPart, quantity, targetCompletion]);
 
   const toggleExpand = (masterPoId: string) => {
     const newExpanded = new Set(expandedMasterPos);
@@ -762,13 +1024,27 @@ function ProductionOrderView({ parts }: { parts: Part[] }) {
     setExpandedMasterPos(newExpanded);
   };
 
+  const handleUpdateSubPoQty = () => {
+    if (password === 'admin123') {
+      if (showEditModal) {
+        storageService.updateSubPoQty(showEditModal.id, showEditModal.qty);
+        onUpdate();
+        setShowEditModal(null);
+        setPassword("");
+      }
+    } else {
+      alert('Mật khẩu không chính xác!');
+    }
+  };
+
   const handleCreatePO = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedPart || quantity <= 0) return;
     
     try {
-      storageService.createMasterPO(selectedPart, quantity);
-      setOrders(storageService.getProductionOrders());
+      const endTs = targetCompletion ? new Date(targetCompletion).getTime() : Date.now();
+      storageService.createMasterPO(selectedPart, quantity, endTs);
+      onUpdate();
       setSelectedPart("");
       setQuantity(0);
       alert('Đã tạo lệnh sản xuất PO Tổng và các PO Con thành công!');
@@ -781,7 +1057,7 @@ function ProductionOrderView({ parts }: { parts: Part[] }) {
     if (password === 'admin123') {
       if (showDeleteModal) {
         storageService.deletePO(showDeleteModal);
-        setOrders(storageService.getProductionOrders());
+        onUpdate();
         setShowDeleteModal(null);
         setPassword("");
       }
@@ -790,8 +1066,30 @@ function ProductionOrderView({ parts }: { parts: Part[] }) {
     }
   };
 
-  // Group orders by masterPoId
-  const masterOrders = orders.filter(o => !o.masterPoId);
+  // Group orders by masterPoId with optimized filtering and searching
+  const masterOrders = useMemo(() => {
+    const partsMap = new Map(parts.map(p => [p.id, p]));
+    const searchLower = searchTerm.toLowerCase();
+    
+    return orders
+      .filter(o => !o.masterPoId)
+      .filter(master => {
+        const part = partsMap.get(master.partId);
+        const partName = part?.name || "";
+        
+        return (
+          master.id.toLowerCase().includes(searchLower) ||
+          master.partId.toLowerCase().includes(searchLower) ||
+          partName.toLowerCase().includes(searchLower)
+        );
+      });
+  }, [orders, parts, searchTerm]);
+
+  const filteredMasterOrders = useMemo(() => {
+    return masterOrders.filter(o => 
+      activeTab === 'REPAIR' ? o.id.startsWith('REPAIR') : !o.id.startsWith('REPAIR')
+    );
+  }, [masterOrders, activeTab]);
   
   return (
     <div className="space-y-8">
@@ -801,43 +1099,118 @@ function ProductionOrderView({ parts }: { parts: Part[] }) {
           <ClipboardList className="text-blue-600" />
           Tạo Lệnh Sản Xuất (PO Tổng)
         </h2>
-        <form onSubmit={handleCreatePO} className="grid grid-cols-1 md:grid-cols-3 gap-6 items-end">
-          <div className="space-y-2">
-            <label className="text-sm font-bold uppercase opacity-50">Chọn Model</label>
-            <SearchableSelect 
-              options={Array.from(new Set(storageService.getModelBOM().map(b => b.modelId))).map(id => ({ 
-                id, 
-                label: parts.find(p => p.id === id)?.name || id 
-              }))}
-              value={selectedPart}
-              onChange={setSelectedPart}
-              placeholder="Chọn model..."
-            />
+        <form onSubmit={handleCreatePO} className="space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 items-end">
+            <div className="space-y-2">
+              <label className="text-sm font-bold uppercase opacity-50">Chọn Model</label>
+              <SearchableSelect 
+                options={Array.from(new Set(storageService.getModelBOM().map(b => b.modelId))).map(id => ({ 
+                  id, 
+                  label: parts.find(p => p.id === id)?.name || id 
+                }))}
+                value={selectedPart}
+                onChange={(val) => {
+                  setSelectedPart(val);
+                }}
+                placeholder="Chọn model..."
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-bold uppercase opacity-50">Thời gian mong muốn hoàn thành</label>
+              <input 
+                type="datetime-local"
+                value={targetCompletion}
+                onChange={e => setTargetCompletion(e.target.value)}
+                className="w-full p-4 p-y-5 rounded-xl border-2 border-gray-100 font-bold text-lg focus:border-blue-600 outline-none"
+              />
+            </div>
+            <div className="space-y-2 col-span-1 md:col-span-2 lg:col-span-1">
+              <label className="text-sm font-bold uppercase opacity-50">Số lượng (pcs)</label>
+              <input 
+                type="number"
+                step="any"
+                value={quantity || ''}
+                onChange={e => setQuantity(parseFloat(e.target.value) || 0)}
+                className="w-full p-5 rounded-xl border-2 border-gray-100 font-bold text-lg focus:border-blue-600 outline-none"
+                placeholder="Nhập số lượng..."
+              />
+            </div>
           </div>
-          <div className="space-y-2">
-            <label className="text-sm font-bold uppercase opacity-50">Số lượng</label>
-            <input 
-              type="number"
-              step="any"
-              value={quantity || ''}
-              onChange={e => setQuantity(parseFloat(e.target.value) || 0)}
-              className="w-full p-5 rounded-xl border-2 border-gray-100 font-bold text-lg focus:border-blue-600 outline-none"
-              placeholder="Nhập số lượng..."
-            />
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center pt-4 border-t border-gray-50">
+            <div className="space-y-1">
+              <label className="text-xs font-bold uppercase opacity-30">Dự kiến bắt đầu cơ khí</label>
+              <div className="flex items-center gap-4">
+                <div className="bg-gray-50 px-6 py-3 rounded-xl border border-gray-100 flex items-center gap-3">
+                  <Clock className="text-blue-600" size={20} />
+                  {estimatedStart ? (
+                    <span className="text-xl font-bold text-blue-700">
+                      {format(new Date(estimatedStart), 'HH:mm - dd/MM/yyyy')}
+                    </span>
+                  ) : (
+                    <span className="text-xl font-bold text-gray-300">--:--</span>
+                  )}
+                </div>
+                {estimatedStart && (
+                  <p className="text-sm font-medium text-gray-500 italic">
+                    * Tính toán tự động theo định mức sản xuất
+                  </p>
+                )}
+              </div>
+            </div>
+            <div className="flex justify-end">
+              <button 
+                type="submit"
+                disabled={!selectedPart || quantity <= 0}
+                className="bg-blue-600 text-white px-12 py-5 rounded-xl font-bold uppercase tracking-widest hover:bg-blue-700 transition-all shadow-lg shadow-blue-200 disabled:opacity-50 disabled:shadow-none"
+              >
+                TẠO LỆNH PO
+              </button>
+            </div>
           </div>
-          <button 
-            type="submit"
-            className="bg-blue-600 text-white py-5 rounded-xl font-bold uppercase tracking-widest hover:bg-blue-700 transition-all shadow-lg shadow-blue-200"
-          >
-            Tạo Lệnh PO
-          </button>
         </form>
       </div>
 
       {/* PO List */}
       <div className="bg-white rounded-3xl border border-gray-200 shadow-sm overflow-hidden">
-        <div className="p-8 border-b border-gray-100 flex justify-between items-center">
-          <h2 className="text-2xl font-bold">Danh sách Lệnh Sản Xuất</h2>
+        <div className="p-8 border-b border-gray-100 flex flex-col md:flex-row justify-between items-center gap-6">
+          <div className="flex flex-col gap-4">
+            <h2 className="text-2xl font-bold">Danh sách Lệnh Sản Xuất</h2>
+            <div className="flex bg-gray-100 p-1 rounded-xl w-fit">
+              <button
+                onClick={() => setActiveTab('STANDARD')}
+                className={cn(
+                  "px-6 py-2 rounded-lg font-bold text-sm uppercase transition-all",
+                  activeTab === 'STANDARD' 
+                    ? "bg-white text-blue-600 shadow-sm" 
+                    : "text-gray-500 hover:text-gray-700"
+                )}
+              >
+                Sản xuất chính
+              </button>
+              <button
+                onClick={() => setActiveTab('REPAIR')}
+                className={cn(
+                  "px-6 py-2 rounded-lg font-bold text-sm uppercase transition-all",
+                  activeTab === 'REPAIR' 
+                    ? "bg-white text-red-600 shadow-sm" 
+                    : "text-gray-500 hover:text-gray-700"
+                )}
+              >
+                Kế hoạch bù (Repair)
+              </button>
+            </div>
+          </div>
+          <div className="relative w-full md:w-80">
+            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
+            <input 
+              type="text"
+              placeholder="Tìm kiếm mã PO, Model..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full pl-11 pr-4 py-3 bg-gray-50 border border-gray-200 rounded-xl font-medium focus:bg-white focus:border-blue-600 outline-none transition-all"
+            />
+          </div>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left">
@@ -850,18 +1223,34 @@ function ProductionOrderView({ parts }: { parts: Part[] }) {
                 <th className="px-8 py-5 text-right">Thực tế</th>
                 <th className="px-8 py-5 text-right">Đã xuất</th>
                 <th className="px-8 py-5">Tiến độ</th>
+                <th className="px-8 py-5">Bắt đầu</th>
                 <th className="px-8 py-5">Dự kiến</th>
                 <th className="px-8 py-5">Trạng thái</th>
                 <th className="px-8 py-5 text-center">Thao tác</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {masterOrders.map((master, idx) => {
+              {filteredMasterOrders.map((master, idx) => {
                 const subOrders = orders.filter(o => o.masterPoId === master.id);
                 const totalTarget = subOrders.reduce((sum, o) => sum + o.targetQuantity, 0);
                 const totalProduced = subOrders.reduce((sum, o) => sum + o.producedQuantity, 0);
                 const overallProgress = totalTarget > 0 ? (totalProduced / totalTarget) * 100 : 0;
                 const isExpanded = expandedMasterPos.has(master.id);
+                
+                let currentStageText = 'MODEL';
+                if (master.id.startsWith('REPAIR')) {
+                  const sortedSubOrders = [...subOrders].sort((a, b) => {
+                    return STAGES.findIndex(s => s.id === a.stageId) - STAGES.findIndex(s => s.id === b.stageId);
+                  });
+                  const activeSubOrder = sortedSubOrders.find(o => o.status !== 'COMPLETED');
+                  if (activeSubOrder) {
+                    currentStageText = `Đang làm: ${STAGES.find(s => s.id === activeSubOrder.stageId)?.name}`;
+                  } else if (sortedSubOrders.length > 0 && sortedSubOrders.every(o => o.status === 'COMPLETED')) {
+                    currentStageText = 'Hoàn thành';
+                  } else {
+                    currentStageText = 'Đang chờ';
+                  }
+                }
 
                 return (
                   <React.Fragment key={`${master.id}-${idx}`}>
@@ -877,9 +1266,18 @@ function ProductionOrderView({ parts }: { parts: Part[] }) {
                           <ChevronRight size={18} />
                         </div>
                         {master.id}
+                        {master.id.startsWith('REPAIR') && (
+                          <span className="bg-red-100 text-red-600 px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-tighter shadow-sm animate-pulse">REPAIR</span>
+                        )}
                       </td>
                       <td className="px-8 py-5 text-lg">{parts.find(p => p.id === master.partId)?.name || master.partId}</td>
-                      <td className="px-8 py-5"><span className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-bold">MODEL</span></td>
+                      <td className="px-8 py-5">
+                        {master.id.startsWith('REPAIR') ? (
+                          <span className="px-2 py-1 bg-red-100 text-red-700 rounded text-xs font-bold">{currentStageText}</span>
+                        ) : (
+                          <span className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-bold">MODEL</span>
+                        )}
+                      </td>
                       <td className="px-8 py-5 text-right text-xl">{master.targetQuantity}</td>
                       <td className="px-8 py-5 text-right text-xl text-blue-600">{master.producedQuantity}</td>
                       <td className="px-8 py-5 text-right text-xl text-orange-600">{master.exportedQuantity || 0}</td>
@@ -890,7 +1288,32 @@ function ProductionOrderView({ parts }: { parts: Part[] }) {
                         <span className="text-xs opacity-50 font-bold">{overallProgress.toFixed(1)}%</span>
                       </td>
                       <td className="px-8 py-5">
-                        <span className="text-xs font-mono opacity-50 uppercase tracking-tighter">-</span>
+                        {master.plannedStartTime ? (
+                          <div className="flex flex-col">
+                            <span className="font-mono text-sm font-bold text-gray-600">
+                              {format(new Date(master.plannedStartTime), 'HH:mm')}
+                            </span>
+                            <span className="text-xs opacity-50">
+                              {format(new Date(master.plannedStartTime), 'dd/MM')}
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="text-xs font-mono opacity-50 uppercase tracking-tighter">-</span>
+                        )}
+                      </td>
+                      <td className="px-8 py-5">
+                        {master.expectedCompletionTime ? (
+                          <div className="flex flex-col">
+                            <span className="font-mono text-sm font-bold text-blue-600">
+                              {format(new Date(master.expectedCompletionTime), 'HH:mm')}
+                            </span>
+                            <span className="text-xs opacity-50">
+                              {format(new Date(master.expectedCompletionTime), 'dd/MM')}
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="text-xs font-mono opacity-50 uppercase tracking-tighter">-</span>
+                        )}
                       </td>
                       <td className="px-8 py-5">
                         <span className={cn(
@@ -915,7 +1338,7 @@ function ProductionOrderView({ parts }: { parts: Part[] }) {
                     {isExpanded && subOrders.sort((a, b) => {
                       const orderA = STAGES.findIndex(s => s.id === a.stageId);
                       const orderB = STAGES.findIndex(s => s.id === b.stageId);
-                      return orderA - orderB;
+                      return orderB - orderA; // order from latest stage (Painting) down to earliest (Mechanics like Laser)
                     }).map((sub, subIdx) => {
                       const progress = (sub.producedQuantity / sub.targetQuantity) * 100;
                       return (
@@ -941,6 +1364,20 @@ function ProductionOrderView({ parts }: { parts: Part[] }) {
                             </div>
                           </td>
                           <td className="px-8 py-4">
+                            {sub.plannedStartTime ? (
+                              <div className="flex flex-col">
+                                <span className="font-mono text-sm font-bold text-gray-500">
+                                  {format(new Date(sub.plannedStartTime), 'HH:mm')}
+                                </span>
+                                <span className="text-xs opacity-50">
+                                  {format(new Date(sub.plannedStartTime), 'dd/MM')}
+                                </span>
+                              </div>
+                            ) : (
+                              <span className="text-[10px] opacity-30 italic">-</span>
+                            )}
+                          </td>
+                          <td className="px-8 py-4">
                             {sub.expectedCompletionTime ? (
                               <div className="flex flex-col">
                                 <span className="font-mono text-sm font-bold text-blue-600">
@@ -962,7 +1399,18 @@ function ProductionOrderView({ parts }: { parts: Part[] }) {
                               {sub.status === 'COMPLETED' ? 'XONG' : 'ĐANG SX'}
                             </span>
                           </td>
-                          <td className="px-8 py-4"></td>
+                          <td className="px-8 py-4 text-center">
+                            <button 
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setShowEditModal({ id: sub.id, qty: sub.targetQuantity });
+                              }}
+                              className="p-1.5 text-blue-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all border border-transparent hover:border-blue-100"
+                              title="Điều chỉnh số lượng"
+                            >
+                              <Edit2 size={16} />
+                            </button>
+                          </td>
                         </tr>
                       );
                     })}
@@ -998,6 +1446,7 @@ function ProductionOrderView({ parts }: { parts: Part[] }) {
                 <label className="text-xs font-bold uppercase opacity-50">Nhập mật khẩu xác nhận</label>
                 <input 
                   type="password"
+                  autoComplete="off"
                   value={password}
                   onChange={e => setPassword(e.target.value)}
                   className="w-full p-4 rounded-lg border border-gray-200 focus:border-red-500 outline-none text-lg"
@@ -1024,39 +1473,108 @@ function ProductionOrderView({ parts }: { parts: Part[] }) {
           </div>
         )}
       </AnimatePresence>
+
+      {/* Edit PO Quantity Modal */}
+      <AnimatePresence>
+        {showEditModal && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-white rounded-2xl p-8 max-w-md w-full shadow-2xl space-y-6"
+            >
+              <div className="flex items-center gap-4 text-blue-600">
+                <Edit2 size={32} />
+                <h3 className="text-xl font-bold">Sửa số lượng PO Con</h3>
+              </div>
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <label className="text-xs font-bold uppercase opacity-50">Số lượng mới</label>
+                  <input 
+                    type="number"
+                    min="1"
+                    value={showEditModal.qty}
+                    onChange={e => setShowEditModal({...showEditModal, qty: parseInt(e.target.value) || 0})}
+                    className="w-full p-4 rounded-lg border border-gray-200 focus:border-blue-500 outline-none text-lg font-bold"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-bold uppercase opacity-50">Mật khẩu xác nhận (Admin)</label>
+                  <input 
+                    type="password"
+                    autoComplete="off"
+                    value={password}
+                    onChange={e => setPassword(e.target.value)}
+                    className="w-full p-4 rounded-lg border border-gray-200 focus:border-blue-500 outline-none text-lg"
+                    placeholder="Nhập mật khẩu..."
+                    onKeyDown={(e) => e.key === 'Enter' && handleUpdateSubPoQty()}
+                  />
+                </div>
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button 
+                  onClick={() => { setShowEditModal(null); setPassword(''); }}
+                  className="flex-1 py-4 bg-gray-100 rounded-lg font-bold text-sm uppercase hover:bg-gray-200 transition-all"
+                >
+                  Hủy
+                </button>
+                <button 
+                  onClick={handleUpdateSubPoQty}
+                  disabled={showEditModal.qty <= 0 || !password}
+                  className="flex-1 py-4 bg-blue-600 text-white rounded-lg font-bold text-sm uppercase hover:bg-blue-700 transition-all shadow-lg disabled:opacity-50"
+                >
+                  Cập nhật
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
 
-function LabelHistoryView({ parts, onPrint, onCopy, onRollback, onManualInboundQR }: { parts: Part[], onPrint: (l: Transaction) => void, onCopy: (t: string) => void, onRollback: () => void, onManualInboundQR: (qrData: string, targetStageId: StageId) => void, key?: string }) {
-  const [labels, setLabels] = useState<Transaction[]>([]);
+function LabelHistoryView({ parts, labels: initialLabels, onPrint, onCopy, onRollback, onManualInboundQR, labelSettings }: { parts: Part[], labels: Transaction[], onPrint: (l: Transaction) => void, onCopy: (t: string) => void, onRollback: () => void, onManualInboundQR: (qrData: string, targetStageId: StageId) => void, labelSettings: any, key?: string }) {
+  const [labels, setLabels] = useState<Transaction[]>(initialLabels);
   const [scannedIds, setScannedIds] = useState<Set<string>>(new Set());
+  const [printedIds, setPrintedIds] = useState<Set<string>>(new Set());
   const [showDeleteModal, setShowDeleteModal] = useState<string | null>(null);
   const [showInboundModal, setShowInboundModal] = useState<string | null>(null);
   const [password, setPassword] = useState("");
   const [selectedLabel, setSelectedLabel] = useState<Transaction | null>(null);
   const [dateFilter, setDateFilter] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
   const [limit, setLimit] = useState(50);
+  const [activeTab, setActiveTab] = useState<'PENDING' | 'FINISHED' | 'PAINTING' | 'DISPOSAL' | 'GLAZING'>('PENDING');
 
   useEffect(() => {
-    const allLabels = storageService.getLabels();
+    setLabels(initialLabels);
+  }, [initialLabels]);
+
+  useEffect(() => {
     const allTransactions = storageService.getTransactions();
     
     // Identify which labels have been scanned
     const scanned = new Set<string>();
+    const printed = new Set<string>();
+
     allTransactions.forEach(tx => {
       if (tx.type === 'STAGE_IN' && tx.qrData) {
-        // Extract txId from qrData: partId|quantity|sourceStageId|timestamp|txId|targetStageId
         const qrParts = tx.qrData.split('|');
         if (qrParts.length >= 5) {
           scanned.add(qrParts[4]);
         }
       }
     });
+
+    labels.forEach(l => {
+      if (l.printed) printed.add(l.id);
+    });
     
-    setLabels(allLabels);
     setScannedIds(scanned);
-  }, []);
+    setPrintedIds(printed);
+  }, [labels]);
 
   const handleRollback = () => {
     if (password === 'admin123') {
@@ -1109,6 +1627,39 @@ function LabelHistoryView({ parts, onPrint, onCopy, onRollback, onManualInboundQ
   };
 
   const filteredLabels = labels.filter(label => {
+    const isScanned = scannedIds.has(label.id);
+    const isPaintingOut = label.stageId === 'PAINTING' && label.type === 'STAGE_OUT';
+    const isGlazingOut = label.stageId === 'GLAZING' && label.type === 'STAGE_OUT';
+    const isDisposal = label.type === 'DISPOSAL';
+    
+    // Split logic into tabs
+    if (activeTab === 'PENDING') {
+      // Pending: Not scanned and NOT specialized labels
+      if (isScanned || isPaintingOut || isGlazingOut || isDisposal) return false;
+    } else if (activeTab === 'PAINTING') {
+      // Painting: Only Painting OUT labels
+      if (!isPaintingOut) return false;
+    } else if (activeTab === 'GLAZING') {
+      // Glazing: Only Glazing OUT labels that are NOT draft (already printed)
+      if (!isGlazingOut || label.printed === false) return false;
+    } else if (activeTab === 'DISPOSAL') {
+      // Disposal: Only disposal labels
+      if (!isDisposal) return false;
+    } else {
+      // Finished: Scanned labels (any stage)
+      if (!isScanned) return false;
+    }
+
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      const pName = parts.find(p => p.id === label.partId)?.name?.toLowerCase() || "";
+      const matches = label.partId.toLowerCase().includes(q) || 
+                      pName.includes(q) || 
+                      (label.poId || "").toLowerCase().includes(q) ||
+                      label.id.toLowerCase().includes(q);
+      if (!matches) return false;
+    }
+
     if (!dateFilter) return true;
     const labelDate = format(label.timestamp, 'yyyy-MM-dd');
     return labelDate === dateFilter;
@@ -1130,16 +1681,87 @@ function LabelHistoryView({ parts, onPrint, onCopy, onRollback, onManualInboundQ
               <h2 className="font-bold text-xl tracking-tight">Danh sách nhãn QR</h2>
               <p className="text-xs text-gray-400 mt-1">Tổng số: {labels.length} nhãn</p>
             </div>
-            <div className="flex gap-2">
+            <div className="flex flex-col gap-1 items-end">
               <div className="flex items-center gap-1">
                 <div className="w-2 h-2 rounded-full bg-green-500" />
-                <span className="text-[10px] font-bold opacity-40 uppercase">Đã nhập</span>
+                <span className="text-[9px] font-bold opacity-60 uppercase">Đã nhập kho</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <div className="w-2 h-2 rounded-full bg-blue-500" />
+                <span className="text-[9px] font-bold opacity-60 uppercase">Đã in nhãn</span>
               </div>
               <div className="flex items-center gap-1">
                 <div className="w-2 h-2 rounded-full bg-gray-200 border border-gray-300" />
-                <span className="text-[10px] font-bold opacity-40 uppercase">Chờ nhập</span>
+                <span className="text-[9px] font-bold opacity-60 uppercase">Chưa in/nhập</span>
               </div>
             </div>
+          </div>
+
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
+            <input 
+              type="text"
+              placeholder="Tìm theo Mã LK, Tên, hoặc Mã PO..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full pl-10 pr-4 py-2 bg-white border border-gray-200 rounded-xl text-sm focus:ring-4 focus:ring-blue-100 focus:border-blue-500 outline-none transition-all"
+            />
+            {searchQuery && (
+              <button 
+                onClick={() => setSearchQuery("")}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+              >
+                <X size={14} />
+              </button>
+            )}
+          </div>
+
+          <div className="flex bg-gray-100 p-1 rounded-xl gap-1">
+            <button 
+              onClick={() => setActiveTab('PENDING')}
+              className={cn(
+                "flex-1 py-2 text-[10px] font-bold uppercase tracking-tight rounded-lg transition-all",
+                activeTab === 'PENDING' ? "bg-white text-blue-600 shadow-sm" : "text-gray-500 hover:text-gray-700"
+              )}
+            >
+              Chờ nhập kho
+            </button>
+            <button 
+              onClick={() => setActiveTab('FINISHED')}
+              className={cn(
+                "flex-1 py-2 text-[10px] font-bold uppercase tracking-tight rounded-lg transition-all",
+                activeTab === 'FINISHED' ? "bg-white text-green-600 shadow-sm" : "text-gray-500 hover:text-gray-700"
+              )}
+            >
+              Đã nhập kho
+            </button>
+            <button 
+              onClick={() => setActiveTab('PAINTING')}
+              className={cn(
+                "flex-1 py-2 text-[10px] font-bold uppercase tracking-tight rounded-lg transition-all",
+                activeTab === 'PAINTING' ? "bg-white text-purple-600 shadow-sm" : "text-gray-500 hover:text-gray-700"
+              )}
+            >
+              Hàng Sơn
+            </button>
+            <button 
+              onClick={() => setActiveTab('GLAZING')}
+              className={cn(
+                "flex-1 py-2 text-[10px] font-bold uppercase tracking-tight rounded-lg transition-all",
+                activeTab === 'GLAZING' ? "bg-white text-orange-600 shadow-sm" : "text-gray-500 hover:text-gray-700"
+              )}
+            >
+              Dán Kính
+            </button>
+            <button 
+              onClick={() => setActiveTab('DISPOSAL')}
+              className={cn(
+                "flex-1 py-2 text-[10px] font-bold uppercase tracking-tight rounded-lg transition-all",
+                activeTab === 'DISPOSAL' ? "bg-white text-red-600 shadow-sm" : "text-gray-500 hover:text-gray-700"
+              )}
+            >
+              Hàng Hủy
+            </button>
           </div>
           
           <div className="relative">
@@ -1170,26 +1792,46 @@ function LabelHistoryView({ parts, onPrint, onCopy, onRollback, onManualInboundQ
             <>
               {displayedLabels.map(label => {
                 const isScanned = scannedIds.has(label.id);
+                const isPrinted = printedIds.has(label.id);
+                const isPaintingOut = label.stageId === 'PAINTING' && !label.targetStageId && label.type === 'STAGE_OUT';
+
                 return (
                   <div 
                     key={label.id}
                     onClick={() => setSelectedLabel(label)}
                     className={cn(
-                      "p-5 cursor-pointer transition-all hover:bg-gray-50 flex justify-between items-center group relative",
+                      "p-5 cursor-pointer transition-all hover:bg-gray-50 flex justify-between items-center group relative border-l-4",
                       selectedLabel?.id === label.id && "ring-2 ring-inset ring-blue-600 z-10",
-                      isScanned ? "bg-green-50/50" : "bg-white"
+                      isScanned ? "bg-green-50/50 border-green-500" : isPrinted ? "bg-blue-50/50 border-blue-500" : "bg-white border-transparent"
                     )}
                   >
                     <div className="flex flex-col gap-1">
                       <div className="flex items-center gap-2">
-                        {isScanned && <CheckCircle2 size={14} className="text-green-600" />}
+                        {isScanned ? (
+                          <CheckCircle2 size={14} className="text-green-600" />
+                        ) : isPrinted ? (
+                          <Printer size={14} className="text-blue-600" />
+                        ) : label.type === 'DISPOSAL' ? (
+                          <Trash2 size={14} className="text-red-600" />
+                        ) : null}
                         <span className="font-bold text-sm">{parts.find(p => p.id === label.partId)?.name || label.partId}</span>
                       </div>
-                      {label.poId && (
-                        <div className="text-[10px] font-mono font-bold text-blue-600">
-                          {label.poId}
-                        </div>
-                      )}
+                      <div className="flex items-center gap-2">
+                        {label.poId && (
+                          <div className="text-[10px] font-mono font-bold text-blue-600">
+                            {label.poId}
+                          </div>
+                        )}
+                        {isPaintingOut && (
+                          <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded">Sơn OUT</span>
+                        )}
+                        {label.stageId === 'GLAZING' && label.type === 'STAGE_OUT' && (
+                          <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 bg-orange-100 text-orange-700 rounded">Dán Kính OUT</span>
+                        )}
+                        {label.type === 'DISPOSAL' && (
+                          <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 bg-red-100 text-red-700 rounded">HÀNG HỦY</span>
+                        )}
+                      </div>
                       <div className="flex items-center gap-2 text-[10px] font-mono opacity-50">
                         <span>{format(label.timestamp, 'dd/MM HH:mm')}</span>
                         <span>•</span>
@@ -1197,9 +1839,11 @@ function LabelHistoryView({ parts, onPrint, onCopy, onRollback, onManualInboundQ
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      {isScanned && (
-                        <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 bg-green-100 text-green-700 rounded">Đã nhập</span>
-                      )}
+                      {isScanned ? (
+                        <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 bg-green-100 text-green-700 rounded whitespace-nowrap">Đã nhập</span>
+                      ) : isPrinted ? (
+                        <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded whitespace-nowrap">Đã in</span>
+                      ) : null}
                       <button 
                         onClick={(e) => {
                           e.stopPropagation();
@@ -1247,103 +1891,159 @@ function LabelHistoryView({ parts, onPrint, onCopy, onRollback, onManualInboundQ
                 </button>
               </div>
               
-              <div id="qr-label-display" className="w-[420px] bg-white border-2 border-black p-6 flex flex-col items-center">
+              <div id="qr-label-display" className={cn(
+                "w-[420px] bg-white border-4 p-6 flex flex-col items-center relative overflow-hidden",
+                selectedLabel.type === 'DISPOSAL' ? "border-black border-dashed" : "border-black"
+              )}>
+                {selectedLabel.type === 'DISPOSAL' && (
+                  <div className="absolute inset-0 flex items-center justify-center opacity-[0.03] pointer-events-none rotate-45">
+                    <span className="text-[100px] font-black whitespace-nowrap">HÀNG HỦY NG</span>
+                  </div>
+                )}
+                
+                {selectedLabel.type === 'DISPOSAL' && (
+                  <div className="w-full bg-black text-white text-center py-2 mb-6 font-black text-lg tracking-widest relative z-10">
+                    NHÃN XUẤT HỦY (DISPOSAL)
+                  </div>
+                )}
+
                 {/* QR Section */}
-                <div className="mb-6 border-[3px] border-black p-1">
+                <div className="mb-6 border-[3px] border-black p-1 bg-white relative z-10">
                   <QRCodeSVG value={selectedLabel.qrData || ''} size={240} level="H" />
                 </div>
 
                 {/* Part Info */}
-                <div className="w-full text-center mb-6">
-                  <h2 className="text-3xl font-black uppercase tracking-tight leading-none mb-2">
-                    {getProcessValue(parts.find(p => p.id === selectedLabel.partId)?.name, parts.find(p => p.id === selectedLabel.partId), selectedLabel.stageId, 'OUT')}
+                <div className="w-full text-center mb-6 relative z-10 text-black">
+                  <h2 className="text-4xl font-black uppercase tracking-tight leading-none mb-2">
+                    {selectedLabel.type === 'DISPOSAL' 
+                      ? (selectedLabel.partName || parts.find(p => p.id === selectedLabel.partId)?.name || selectedLabel.partId)
+                      : getProcessValue(selectedLabel.partName || parts.find(p => p.id === selectedLabel.partId)?.name, parts.find(p => p.id === selectedLabel.partId), selectedLabel.stageId, 'OUT')}
                   </h2>
-                  <p className="font-mono text-lg font-bold opacity-80">
-                    Mã LK: {getProcessValue(selectedLabel.partId, parts.find(p => p.id === selectedLabel.partId), selectedLabel.stageId, 'OUT')}
+                  <p className="font-mono font-black mt-1 text-black break-words" style={{ fontSize: `${labelSettings.fontSize + 4}px` }}>
+                    Mã LK: {selectedLabel.type === 'DISPOSAL' 
+                      ? selectedLabel.partId 
+                      : getProcessValue(selectedLabel.partId, parts.find(p => p.id === selectedLabel.partId), selectedLabel.stageId, 'OUT')}
                   </p>
                 </div>
 
                 {/* Main Stats */}
-                <div className="w-full grid grid-cols-2 border-t-[3px] border-black py-4">
+                <div className="w-full grid grid-cols-2 border-t-[3px] border-black py-4 relative z-10 text-black">
                   <div className="text-center border-r-[3px] border-black px-2 flex flex-col justify-center">
-                    <span className="text-[10px] font-bold uppercase opacity-60 mb-1">Số lượng:</span>
+                    <span className="text-[10px] font-black uppercase mb-1">Số lượng:</span>
                     <span className="text-3xl font-black">{selectedLabel.quantity} {parts.find(p => p.id === selectedLabel.partId)?.unit}</span>
                   </div>
                   <div className="text-center px-2 flex flex-col justify-center">
-                    <span className="text-[10px] font-bold uppercase opacity-60 mb-1">Từ công đoạn:</span>
+                    <span className="text-[10px] font-black uppercase mb-1 text-black">
+                      {selectedLabel.type === 'DISPOSAL' ? 'Kho xuất:' : 'Từ công đoạn:'}
+                    </span>
                     <span className="text-2xl font-black uppercase leading-tight">
-                      {STAGES.find(s => s.id === selectedLabel.stageId)?.name}
+                      {STAGES.find(s => s.id === selectedLabel.stageId)?.name} {selectedLabel.type === 'DISPOSAL' && '(NG)'}
                     </span>
                   </div>
                 </div>
 
-                {/* Destination Box */}
-                <div className="w-full border-[3px] border-black rounded-lg p-4 my-4 text-center">
-                  <span className="text-[10px] font-bold uppercase opacity-60 block mb-2">Đích tiếp theo:</span>
-                  <div className="flex items-center justify-center gap-4 font-black text-xl italic group">
-                    <span>{STAGES.find(s => s.id === selectedLabel.stageId)?.name}</span>
-                    <ArrowRight size={24} strokeWidth={3} className="text-[#F27D26]" />
-                    <span>{STAGES.find(s => s.id === (selectedLabel.targetStageId || selectedLabel.qrData?.split('|')?.[5]))?.name || 
-                           ((selectedLabel.targetStageId || selectedLabel.qrData?.split('|')?.[5]) === 'DCLR' ? 'Lắp ráp (DCLR)' : 'HOÀN THÀNH')}</span>
+                {/* Destination Box / Warning */}
+                {selectedLabel.type === 'DISPOSAL' ? (
+                  <div className="w-full border-[3px] border-black rounded-lg p-3 my-4 text-center bg-transparent relative z-10 text-black">
+                    <span className="text-sm font-black uppercase block tracking-tighter text-black">HÀNG LỖI CẤM NHẬP KHO</span>
                   </div>
-                </div>
+                ) : (
+                  <div className="w-full border-[3px] border-black rounded-lg p-4 my-4 text-center text-black">
+                    <span className="text-[10px] font-black uppercase block mb-2 text-black">Đích tiếp theo:</span>
+                    <div className="flex items-center justify-center gap-4 font-black text-xl italic group">
+                      <span>{STAGES.find(s => s.id === selectedLabel.stageId)?.name}</span>
+                      <ArrowRight size={24} strokeWidth={3} className="text-black" />
+                      <span>{STAGES.find(s => s.id === (selectedLabel.targetStageId || selectedLabel.qrData?.split('|')?.[5]))?.name || 
+                             ((selectedLabel.targetStageId || selectedLabel.qrData?.split('|')?.[5]) === 'DCLR' ? 'Lắp ráp (DCLR)' : 'HOÀN THÀNH')}</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Optional Glazing Times */}
+                {(selectedLabel as any).planId && (() => {
+                  const plan = storageService.getGlazingPlans().find(p => p.id === (selectedLabel as any).planId);
+                  if (plan) {
+                    return (
+                      <div className="w-full flex justify-between font-mono font-bold text-black border-t border-b border-black py-2 mb-2" style={{ fontSize: `${labelSettings.fontSize + 2}px` }}>
+                         <div className="flex flex-col text-left">
+                           <span className="text-[14px] uppercase font-black">HT Dự Kiến</span>
+                           <span>{plan.expectedCompletionTime ? format(plan.expectedCompletionTime, 'HH:mm dd/MM') : '--:--'}</span>
+                         </div>
+                         <div className="flex flex-col text-right">
+                           <span className="text-[14px] uppercase font-black">HT Thực Tế</span>
+                           <span>{format(selectedLabel.timestamp, 'HH:mm dd/MM')}</span>
+                         </div>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
 
                 {/* PO Details Section */}
-                <div className="w-full space-y-1 mb-6 text-[11px] font-bold bg-gray-50 p-3 border border-black/10 rounded">
+                <div className="mb-2 w-full space-y-1 text-[11px] font-black bg-transparent p-3 border-2 border-black rounded text-black">
                   <div className="flex justify-between items-center">
-                    <span className="opacity-50">LOẠI PO:</span>
+                    <span className="uppercase text-black">LOẠI PO:</span>
                     {(() => {
                       const po = storageService.getProductionOrders().find(p => p.id === selectedLabel.poId);
                       return (
-                        <span className={cn(
-                          "px-2 py-0.5 rounded text-[9px] uppercase",
-                          po?.masterPoId ? "bg-blue-100 text-blue-700" : "bg-purple-100 text-purple-700"
-                        )}>
+                        <span className="px-2 py-0.5 rounded text-[9px] uppercase font-black text-black">
                           {po?.masterPoId ? 'PO Con (Sub)' : 'PO Tổng (Master)'}
                         </span>
                       );
                     })()}
                   </div>
-                  <div className="flex justify-between items-center">
-                    <span className="opacity-50 uppercase">Mã PO:</span>
-                    <span className="font-mono text-[12px]">{selectedLabel.poId || 'N/A'}</span>
+                  <div className="flex justify-between items-center text-black">
+                    <span className="uppercase text-black">Mã PO:</span>
+                    <span className="font-mono text-[12px] font-black">{selectedLabel.poId || 'N/A'}</span>
                   </div>
-                  <div className="flex justify-between items-center text-[10px] text-gray-500 italic">
+                  <div className="flex justify-between items-center text-[10px] italic font-black text-black">
                     <span>Kế hoạch PO Con:</span>
                     <span>{selectedLabel.qrData?.split('|')?.[8] || storageService.getProductionOrders().find(p => p.id === selectedLabel.poId)?.targetQuantity || 0} linh kiện</span>
                   </div>
                   {(() => {
                     const po = storageService.getProductionOrders().find(p => p.id === selectedLabel.poId);
                     const masterId = po?.masterPoId || selectedLabel.qrData?.split('|')?.[7];
-                    return masterId && (
+                    return (
                       <>
-                        <div className="flex justify-between items-center">
-                          <span className="opacity-50 uppercase">Thuộc PO Tổng:</span>
-                          <span className="font-mono text-[12px] text-red-600">{masterId}</span>
-                        </div>
-                        <div className="flex justify-between items-center text-[10px] text-gray-500 italic">
-                          <span>Kế hoạch PO Tổng:</span>
-                          <span>{selectedLabel.qrData?.split('|')?.[9] || storageService.getProductionOrders().find(p => p.id === masterId)?.targetQuantity || 0} máy</span>
-                        </div>
+                        {po?.plannedStartTime && (
+                          <div className="flex justify-between items-center pt-1 border-t border-black">
+                            <span className="uppercase text-black font-black">KH Bắt đầu PO:</span>
+                            <span className="font-mono font-black">{format(po.plannedStartTime, 'dd/MM HH:mm')}</span>
+                          </div>
+                        )}
+                        {po?.expectedCompletionTime && (
+                          <div className="flex justify-between items-center">
+                            <span className="uppercase text-black font-black">KH Kết thúc PO:</span>
+                            <span className="font-mono font-black">{format(po.expectedCompletionTime, 'dd/MM HH:mm')}</span>
+                          </div>
+                        )}
+                        {masterId && (
+                          <>
+                            <div className="flex justify-between items-center pt-1 border-t border-black">
+                              <span className="uppercase text-black font-black">Thuộc PO Tổng:</span>
+                              <span className="font-mono text-[12px] font-black text-black">{masterId}</span>
+                            </div>
+                            <div className="flex justify-between items-center text-[10px] italic font-black text-black">
+                              <span>Kế hoạch PO Tổng:</span>
+                              <span>{selectedLabel.qrData?.split('|')?.[9] || storageService.getProductionOrders().find(p => p.id === masterId)?.targetQuantity || 0} máy</span>
+                            </div>
+                          </>
+                        )}
                       </>
                     );
                   })()}
-                  <div className="flex justify-between items-center pt-1 border-t border-black/5 mt-1">
-                    <span className="opacity-50 uppercase">Bắt đầu đi:</span>
-                    <span className="font-mono">{format(selectedLabel.timestamp, 'HH:mm:ss')}</span>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="opacity-50 uppercase">Đến dự kiến:</span>
-                    <span className="font-mono">{format(selectedLabel.timestamp, 'HH:mm:ss')}</span>
+                  <div className="flex justify-between items-center pt-1 mt-1 border-t border-black">
+                    <span className="uppercase text-[9px] text-black font-black">Hoàn thành thực tế:</span>
+                    <span className="font-mono font-black text-black">{format(selectedLabel.timestamp, 'dd/MM/yyyy HH:mm:ss')}</span>
                   </div>
                 </div>
 
-                <div className="w-full border-t-[3px] border-black pt-4 flex justify-between items-end text-left">
+                <div className="w-full border-t-[3px] border-black pt-4 justify-between items-end text-left text-black hidden">
                   <div className="flex flex-col text-[11px] font-mono leading-none">
-                    <span className="font-black mb-1">ID: {selectedLabel.id}</span>
-                    <span className="opacity-60">Thời gian: {format(selectedLabel.timestamp, 'dd/MM/yyyy HH:mm:ss')}</span>
+                    <span className="font-black mb-1 text-black">ID: {selectedLabel.id}</span>
+                    <span className="font-black text-black">Thời gian: {format(selectedLabel.timestamp, 'dd/MM/yyyy HH:mm:ss')}</span>
                   </div>
-                  <span className="text-[11px] font-black tracking-tighter italic opacity-40 text-right">WIP TRACKING</span>
+                  <span className="text-[11px] font-black tracking-tighter italic text-black">WIP TRACKING</span>
                 </div>
               </div>
 
@@ -1483,24 +2183,231 @@ function LabelHistoryView({ parts, onPrint, onCopy, onRollback, onManualInboundQ
   );
 }
 
-function DashboardView({ inventory, parts, refreshData }: DashboardProps) {
+const exportDailyProductionReport = (transactions: Transaction[], parts: Part[]) => {
+  const norms = storageService.getNorms();
+  const pos = storageService.getProductionOrders();
+  
+  const now = new Date();
+  const startOfToday = startOfDay(now).getTime();
+
+  // Filter transactions for STAGE_OUT in the current day
+  const todayTransactions = transactions.filter(t => 
+    t.type === 'STAGE_OUT' && t.timestamp >= startOfToday
+  );
+
+  if (todayTransactions.length === 0) {
+    alert('Không có dữ liệu sản xuất xuất kho trong ngày hôm nay.');
+    return;
+  }
+
+  // Time slot definitions
+  const TIME_SLOTS = [
+    { label: '7h-8h', start: 7, end: 8 },
+    { label: '8h-10h', start: 8, end: 10 },
+    { label: '10h-12h', start: 10, end: 12 },
+    { label: '13h-15h', start: 13, end: 15 },
+    { label: '15h-17h', start: 15, end: 17 },
+    { label: '17h-19h', start: 17, end: 19 },
+    { label: '19h-20h', start: 19, end: 20 },
+  ];
+
+  const getSlot = (timestamp: number) => {
+    const d = new Date(timestamp);
+    const h = d.getHours();
+    for (const slot of TIME_SLOTS) {
+      if (h >= slot.start && h < slot.end) return slot.label;
+    }
+    return 'Khác';
+  };
+
+  // Group by Part and Stage
+  const processData = new Map<string, {
+    partId: string;
+    stageId: StageId;
+    partName: string;
+    targetQty: number;
+    producedQty: number;
+    norms: number;
+    slots: Record<string, number>;
+  }>();
+
+  todayTransactions.forEach(t => {
+    const key = `${t.partId}_${t.stageId}`;
+    if (!processData.has(key)) {
+      const part = parts.find(p => p.id === t.partId);
+      const stageName = STAGES.find(s => s.id === t.stageId)?.name || t.stageId;
+      
+      const partPos = pos.filter(po => po.partId === t.partId && po.status === 'IN_PROGRESS' && po.stageId === t.stageId);
+      const targetQty = partPos.reduce((sum, po) => sum + po.targetQuantity, 0);
+
+      const norm = norms.find(n => n.partId === t.partId && n.stageId === t.stageId)?.secondsPerUnit || 0;
+
+      processData.set(key, {
+        partId: t.partId,
+        stageId: t.stageId,
+        partName: `${part?.name || t.partId} (${stageName})`,
+        targetQty: targetQty || 0,
+        producedQty: 0,
+        norms: norm,
+        slots: {}
+      });
+    }
+
+    const data = processData.get(key)!;
+    data.producedQty += t.quantity;
+    
+    const slot = getSlot(t.timestamp);
+    data.slots[slot] = (data.slots[slot] || 0) + t.quantity;
+  });
+
+  const rows = Array.from(processData.values()).map(data => {
+    const remaining = data.targetQty > 0 ? Math.max(0, data.targetQty - data.producedQty) : 0;
+    const completionRate = data.targetQty > 0 ? (data.producedQty / data.targetQty) : 1;
+    
+    const row: any = {
+      'Model': data.partName,
+      'KHSX Ngày': data.targetQty || data.producedQty,
+      'Thực Hiện': data.producedQty,
+      'Còn Lại': remaining,
+      'Tỉ Lệ Hoàn Thành': `${(completionRate * 100).toFixed(1)}%`,
+      'HSQĐ': data.norms > 0 ? data.norms : '',
+      'KHSX sau QĐ': data.targetQty,
+    };
+
+    let totalSlots = 0;
+    TIME_SLOTS.forEach(slot => {
+      row[slot.label] = data.slots[slot.label] || 0;
+      totalSlots += row[slot.label];
+    });
+
+    const other = data.slots['Khác'] || 0;
+    if (other > 0) {
+      row['Khác'] = other;
+      totalSlots += other;
+    }
+
+    row['Tổng sản lượng'] = data.producedQty;
+    row['Ghi chú'] = '';
+
+    return row;
+  });
+
+  const totalRow: any = {
+    'Model': 'TỔNG CỘNG',
+    'KHSX Ngày': rows.reduce((s, r) => s + (r['KHSX Ngày'] || 0), 0),
+    'Thực Hiện': rows.reduce((s, r) => s + (r['Thực Hiện'] || 0), 0),
+    'Còn Lại': rows.reduce((s, r) => s + (r['Còn Lại'] || 0), 0),
+    'Tỉ Lệ Hoàn Thành': '',
+    'HSQĐ': '',
+    'KHSX sau QĐ': rows.reduce((s, r) => s + (r['KHSX Ngày'] || 0), 0),
+  };
+  
+  TIME_SLOTS.forEach(slot => {
+    totalRow[slot.label] = rows.reduce((s, r) => s + (r[slot.label] || 0), 0);
+  });
+  if (rows.some(r => r['Khác'] !== undefined)) {
+    totalRow['Khác'] = rows.reduce((s, r) => s + (r['Khác'] || 0), 0);
+  }
+  totalRow['Tổng sản lượng'] = totalRow['Thực Hiện'];
+  totalRow['Ghi chú'] = '';
+
+  rows.push(totalRow);
+
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "BaoCaoNgay");
+  XLSX.writeFile(wb, `BaoCao_SanLuong_${format(new Date(), 'yyyyMMdd')}.xlsx`);
+};
+
+function DashboardView({ inventory, parts, transactions, refreshData, setDefectModal }: DashboardProps & { setDefectModal: any }) {
   const [selectedStageDetail, setSelectedStageDetail] = useState<StageId | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
 
-  const chartData = STAGES.map(stage => {
-    const inQty = inventory
-      .filter(item => item.stageId === stage.id && item.location === 'IN')
-      .reduce((sum, item) => sum + item.quantity, 0);
-    const outQty = inventory
-      .filter(item => item.stageId === stage.id && item.location === 'OUT')
-      .reduce((sum, item) => sum + item.quantity, 0);
-    
-    return {
-      name: stage.name,
-      'Chờ SX (IN)': inQty,
-      'Hoàn thành (OUT)': outQty,
-    };
+  const [chartDate, setChartDate] = useState(() => {
+    const today = new Date();
+    const offset = today.getTimezoneOffset();
+    const local = new Date(today.getTime() - (offset*60*1000));
+    return local.toISOString().split('T')[0];
   });
+
+  const productionChartData = useMemo(() => {
+    const timeSlots = [
+      { label: '7h-8h', start: 7, end: 8 },
+      { label: '8h-10h', start: 8, end: 10 },
+      { label: '10h-12h', start: 10, end: 12 },
+      { label: '13h-15h', start: 13, end: 15 },
+      { label: '15h-17h', start: 15, end: 17 },
+      { label: '17h-19h', start: 17, end: 19 },
+      { label: '19h-20h', start: 19, end: 20 },
+    ];
+
+    const targetStages = ['LASER', 'BENDING', 'WELDING', 'PAINTING'];
+    
+    // Filter transactions by date and type STAGE_OUT (location IN -> processing done)
+    const productionTransactions = transactions.filter(t => {
+      // "Năng lực sản xuất" logic: When something leaves 'IN' at a stage (moves to OUT),
+      // OR when something is manually inbound directly to 'OUT' (like Laser Cutting)
+      const isProducedAtStage = 
+        (t.type === 'STAGE_OUT' && t.location === 'IN') ||
+        (t.type === 'STAGE_IN' && t.location === 'OUT');
+
+      if (!isProducedAtStage) return false;
+      if (!targetStages.includes(t.stageId)) return false;
+      
+      const txDateObj = new Date(t.timestamp);
+      const offset = txDateObj.getTimezoneOffset();
+      const localDate = new Date(txDateObj.getTime() - (offset*60*1000));
+      const txDate = localDate.toISOString().split('T')[0];
+      
+      return txDate === chartDate;
+    });
+
+    return timeSlots.map(slot => {
+      const slotData: any = { name: slot.label, details: {} };
+      targetStages.forEach(stageId => {
+        const stageName = STAGES.find(s => s.id === stageId)?.name || stageId;
+        slotData[stageName] = 0;
+        slotData.details[stageName] = [];
+      });
+
+      const slotTxs = productionTransactions.filter(t => {
+        const hour = new Date(t.timestamp).getHours();
+        return hour >= slot.start && hour < slot.end;
+      });
+
+      slotTxs.forEach(t => {
+        const stageName = STAGES.find(s => s.id === t.stageId)?.name || t.stageId;
+        slotData[stageName] += t.quantity;
+        
+        const part = parts.find((p: any) => p.id === t.partId);
+        const partName = part ? part.name : (t.partName || t.partId);
+        const unit = part?.unit || 'cái';
+        
+        const existingDetail = slotData.details[stageName].find((d: any) => d.partName === partName);
+        if (existingDetail) {
+          existingDetail.quantity += t.quantity;
+        } else {
+          slotData.details[stageName].push({ partName, quantity: t.quantity, unit });
+        }
+      });
+
+      return slotData;
+    });
+  }, [transactions, chartDate]);
+
+  const stageSummaries = useMemo(() => {
+    return STAGES.map(stage => {
+      const stageItems = inventory.filter(item => item.stageId === stage.id);
+      return {
+        id: stage.id,
+        name: stage.name,
+        total: stageItems.reduce((sum, item) => sum + item.quantity, 0),
+        in: stageItems.filter(i => i.location === 'IN').reduce((sum, i) => sum + i.quantity, 0),
+        out: stageItems.filter(i => i.location === 'OUT').reduce((sum, i) => sum + i.quantity, 0),
+        defect: stageItems.filter(i => i.location === 'DEFECT').reduce((sum, i) => sum + i.quantity, 0),
+      };
+    });
+  }, [inventory]);
 
   return (
     <motion.div 
@@ -1509,18 +2416,26 @@ function DashboardView({ inventory, parts, refreshData }: DashboardProps) {
       exit={{ opacity: 0, y: -20 }}
       className="space-y-8"
     >
+      <div className="flex justify-between items-center mb-6">
+        <h3 className="text-xl font-bold uppercase text-gray-800">Tổng quan Sản xuất</h3>
+        <button
+          onClick={() => exportDailyProductionReport(transactions, parts)}
+          className="flex items-center gap-2 px-5 py-3 bg-green-600 text-white rounded-xl shadow-lg hover:bg-green-700 transition-colors font-bold uppercase tracking-wider"
+        >
+          <FileSpreadsheet size={20} />
+          Xuất báo cáo SX ngày
+        </button>
+      </div>
+
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        {STAGES.map(stage => {
-          const total = inventory
-            .filter(item => item.stageId === stage.id)
-            .reduce((sum, item) => sum + item.quantity, 0);
-          const isActive = selectedStageDetail === stage.id;
+        {stageSummaries.filter(s => s.id !== 'GLAZING').map((summary, idx) => {
+          const isActive = selectedStageDetail === summary.id;
 
           return (
             <button 
-              key={stage.id} 
-              onClick={() => setSelectedStageDetail(isActive ? null : stage.id)}
+              key={summary.id} 
+              onClick={() => setSelectedStageDetail(isActive ? null : summary.id)}
               className={cn(
                 "bg-white p-6 rounded-xl border transition-all text-left group",
                 isActive 
@@ -1536,21 +2451,27 @@ function DashboardView({ inventory, parts, refreshData }: DashboardProps) {
                   <Package size={20} />
                 </div>
                 <div className="flex flex-col items-end">
-                  <span className="text-sm font-mono font-bold text-gray-600 uppercase tracking-widest">Stage {STAGES.indexOf(stage) + 1}</span>
+                  <span className="text-sm font-mono font-bold text-gray-600 uppercase tracking-widest">Stage {idx + 1}</span>
                   {isActive && <div className="w-2 h-2 rounded-full bg-[#F27D26] mt-1 animate-pulse" />}
                 </div>
               </div>
-              <h3 className="font-bold text-2xl text-gray-900 mb-1">{stage.name}</h3>
-              <p className="text-4xl font-mono font-bold tracking-tighter">{total}</p>
-              <div className="mt-4 flex gap-6 text-sm font-mono uppercase font-bold">
-                <div className="flex flex-col">
-                  <span className="opacity-70">Tồn IN</span>
-                  <span className="text-xl">{inventory.filter(i => i.stageId === stage.id && i.location === 'IN').reduce((s, i) => s + i.quantity, 0)}</span>
+              <h3 className="font-bold text-2xl text-gray-900 mb-1">{summary.name}</h3>
+              <p className="text-4xl font-mono font-bold tracking-tighter">{summary.total}</p>
+              <div className="mt-4 flex gap-4 text-xs font-mono uppercase font-bold overflow-x-auto pb-2">
+                <div className="flex flex-col min-w-[60px]">
+                  <span className="opacity-50">Tồn IN</span>
+                  <span className="text-lg">{summary.in}</span>
                 </div>
-                <div className="flex flex-col">
-                  <span className="opacity-70">Tồn OUT</span>
-                  <span className={cn("text-xl", isActive ? "text-[#F27D26]" : "text-[#F27D26]/80")}>
-                    {inventory.filter(i => i.stageId === stage.id && i.location === 'OUT').reduce((s, i) => s + i.quantity, 0)}
+                <div className="flex flex-col min-w-[60px]">
+                  <span className="opacity-50">Tồn OUT</span>
+                  <span className={cn("text-lg", isActive ? "text-[#F27D26]" : "text-[#F27D26]/80")}>
+                    {summary.out}
+                  </span>
+                </div>
+                <div className="flex flex-col min-w-[60px]">
+                  <span className="text-red-500">Defect</span>
+                  <span className="text-lg text-red-600">
+                    {summary.defect}
                   </span>
                 </div>
               </div>
@@ -1596,6 +2517,17 @@ function DashboardView({ inventory, parts, refreshData }: DashboardProps) {
                     <Edit2 size={20} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
                   </div>
                   <button 
+                    onClick={() => {
+                      if (selectedStageDetail) {
+                        setDefectModal({ partId: '', stageId: selectedStageDetail });
+                      }
+                    }}
+                    className="flex items-center gap-2 px-6 py-3 bg-red-50 text-red-600 rounded-xl border-2 border-red-100 font-bold uppercase tracking-widest hover:bg-red-100 transition-all shadow-sm active:scale-95"
+                  >
+                    <AlertCircle size={20} />
+                    <span>Báo lỗi nhanh (NG)</span>
+                  </button>
+                  <button 
                     onClick={() => { setSelectedStageDetail(null); setSearchTerm(''); }}
                     className="p-2 hover:bg-gray-100 rounded-full transition-colors text-gray-400"
                   >
@@ -1604,7 +2536,39 @@ function DashboardView({ inventory, parts, refreshData }: DashboardProps) {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+              {selectedStageDetail === 'DCLR' && (
+                <div className="mb-8 p-6 bg-red-50 border-2 border-red-200 rounded-2xl flex flex-col md:flex-row justify-between items-center gap-6 shadow-sm animate-in fade-in slide-in-from-top-4 duration-500">
+                  <div className="flex items-center gap-4">
+                    <div className="bg-red-600 p-4 rounded-2xl text-white shadow-lg">
+                      <Trash2 size={32} />
+                    </div>
+                    <div>
+                      <h4 className="text-xl font-black text-red-700 uppercase italic">Xóa tất cả tồn kho DCLR OUT</h4>
+                      <p className="text-red-600 font-medium opacity-80">Hành động này sẽ xóa vĩnh viễn toàn bộ số lượng đang có tại kho OUT của DCLR.</p>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => {
+                      const pwd = prompt('Nhập mật khẩu ADMIN để xóa hết tồn kho DCLR OUT:');
+                      if (pwd === 'admin123') {
+                        if (confirm('BẠN CÓ CHẮC CHẮN MUỐN XÓA HẾT TỒN KHO DCLR OUT? Hành động này không thể hoàn tác!')) {
+                          storageService.clearStageInventory('DCLR', 'OUT');
+                          refreshData();
+                          alert('Đã xóa sạch tồn kho DCLR OUT thành công!');
+                        }
+                      } else if (pwd !== null) {
+                        alert('Mật khẩu không chính xác!');
+                      }
+                    }}
+                    className="px-8 py-4 bg-red-600 text-white rounded-xl font-black uppercase tracking-tighter hover:bg-black transition-all flex items-center gap-3 shadow-xl active:scale-95 group"
+                  >
+                    <Trash2 size={24} className="group-hover:rotate-12 transition-transform" />
+                    Xác nhận xóa hết
+                  </button>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                 {/* KHO_IN Detail */}
                 <div className="space-y-4">
                   <div className="flex items-center gap-2 px-2">
@@ -1620,32 +2584,58 @@ function DashboardView({ inventory, parts, refreshData }: DashboardProps) {
       </tr>
     </thead>
                       <tbody className="divide-y divide-gray-100">
-                        {parts
-                          .filter(part => {
-                            const qty = inventory.find(i => i.partId === part.id && i.stageId === selectedStageDetail && i.location === 'IN')?.quantity || 0;
-                            const matchesSearch = part.id.toLowerCase().includes(searchTerm.toLowerCase()) || part.name.toLowerCase().includes(searchTerm.toLowerCase());
-                            return qty > 0 && matchesSearch;
+                        {inventory
+                          .filter(item => item.stageId === selectedStageDetail && item.location === 'IN' && item.quantity > 0)
+                          .filter(item => {
+                            const partStr = item.partId;
+                            const part = parts.find(p => p.id === partStr || p.name === partStr);
+                            const originalPart = item.originalPartId ? parts.find(p => p.id === item.originalPartId || p.name === item.originalPartId) : null;
+                            const searchLower = searchTerm.toLowerCase();
+                            const matchesSearch = item.partId.toLowerCase().includes(searchLower) || 
+                                                 (part && part.name.toLowerCase().includes(searchLower)) ||
+                                                 (item.originalPartId && item.originalPartId.toLowerCase().includes(searchLower)) ||
+                                                 (originalPart && originalPart.name.toLowerCase().includes(searchLower));
+                            return matchesSearch;
                           })
-                          .map(part => {
-                            const qty = inventory.find(i => i.partId === part.id && i.stageId === selectedStageDetail && i.location === 'IN')?.quantity || 0;
-                            const displayQty = part.level === 3 ? qty.toFixed(4) : qty;
+                          .map((item, idx) => {
+                            const partStr = item.partId;
+                            const part = parts.find(p => p.id === partStr || p.name === partStr);
+                            const originalPart = item.originalPartId ? parts.find(p => p.id === item.originalPartId || p.name === item.originalPartId) : null;
+                            const qty = item.quantity;
+                            const displayQty = (part?.level === 3 || originalPart?.level === 3) ? qty.toFixed(4) : qty;
+                            const displayUnit = part?.unit || originalPart?.unit || 'Bộ';
+
                             return (
-                              <tr key={part.id} className="hover:bg-white transition-colors">
+                              <tr key={`${item.partId}-${item.originalPartId}-${idx}`} className="hover:bg-white transition-colors">
                                 <td className="p-4">
-                                  <div className="font-bold text-base">{getProcessValue(part.id, part, selectedStageDetail, 'IN')}</div>
-                                  <div className="text-xs opacity-50">{getProcessValue(part.name, part, selectedStageDetail, 'IN')}</div>
+                                  <div className="font-bold text-base">{getProcessValue(part?.name || item.partId, part, selectedStageDetail, 'IN')}</div>
+                                  <div className="text-xs opacity-50 flex flex-wrap gap-2 items-center">
+                                    {getProcessValue(part?.id || item.partId, part, selectedStageDetail, 'IN')}
+                                    {item.originalPartId && (
+                                      <span className="px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded text-[10px] font-medium border border-blue-100">
+                                        Nguồn: {originalPart?.name || item.originalPartId} ({originalPart?.id || item.originalPartId})
+                                      </span>
+                                    )}
+                                  </div>
                                 </td>
                                 <td className="p-4 text-right">
                                   <div className="flex items-center justify-end gap-3">
                                     <span className="font-mono font-bold text-xl">{displayQty}</span>
-                                    <span className="text-xs font-mono opacity-40 uppercase mr-4">{part.unit}</span>
+                                    <span className="text-xs font-mono opacity-40 uppercase mr-4">{displayUnit}</span>
+                                    <button 
+                                      onClick={() => setDefectModal({ partId: item.partId, stageId: selectedStageDetail })}
+                                      className="p-2 hover:bg-red-50 text-red-600 rounded-lg transition-colors"
+                                      title="Báo lỗi (NG)"
+                                    >
+                                      <AlertCircle size={16} />
+                                    </button>
                                     <button 
                                       onClick={() => {
                                         const pwd = prompt('Nhập mật khẩu để sửa tồn kho:');
                                         if (pwd === 'admin123') {
-                                          const newQty = prompt(`Nhập số lượng tồn mới cho ${part.id}:`, String(qty));
+                                          const newQty = prompt(`Nhập số lượng tồn mới cho ${item.partId}:`, String(qty));
                                           if (newQty !== null) {
-                                            storageService.setInventoryQuantity(part.id, selectedStageDetail, 'IN', parseFloat(newQty) || 0);
+                                            storageService.setInventoryQuantity(item.partId, selectedStageDetail, 'IN', parseFloat(newQty) || 0, item.originalPartId);
                                             refreshData();
                                           }
                                         } else if (pwd !== null) {
@@ -1661,8 +2651,8 @@ function DashboardView({ inventory, parts, refreshData }: DashboardProps) {
                                       onClick={() => {
                                         const pwd = prompt('Nhập mật khẩu để xóa tồn kho:');
                                         if (pwd === 'admin123') {
-                                          if (confirm(`Bạn có chắc chắn muốn xóa tồn kho của ${part.id} tại ${STAGES.find(s => s.id === selectedStageDetail)?.name} (Kho IN)?`)) {
-                                            storageService.deleteInventoryItem(part.id, selectedStageDetail, 'IN');
+                                          if (confirm(`Bạn có chắc chắn muốn xóa tồn kho của ${item.partId} tại ${STAGES.find(s => s.id === selectedStageDetail)?.name} (Kho IN)?`)) {
+                                            storageService.deleteInventoryItem(item.partId, selectedStageDetail, 'IN', item.originalPartId);
                                             refreshData();
                                           }
                                         } else if (pwd !== null) {
@@ -1699,32 +2689,58 @@ function DashboardView({ inventory, parts, refreshData }: DashboardProps) {
       </tr>
     </thead>
                       <tbody className="divide-y divide-gray-100">
-                        {parts
-                          .filter(part => {
-                            const qty = inventory.find(i => i.partId === part.id && i.stageId === selectedStageDetail && i.location === 'OUT')?.quantity || 0;
-                            const matchesSearch = part.id.toLowerCase().includes(searchTerm.toLowerCase()) || part.name.toLowerCase().includes(searchTerm.toLowerCase());
-                            return qty > 0 && matchesSearch;
+                        {inventory
+                          .filter(item => item.stageId === selectedStageDetail && item.location === 'OUT' && item.quantity > 0)
+                          .filter(item => {
+                            const partStr = item.partId;
+                            const part = parts.find(p => p.id === partStr || p.name === partStr);
+                            const originalPart = item.originalPartId ? parts.find(p => p.id === item.originalPartId || p.name === item.originalPartId) : null;
+                            const searchLower = searchTerm.toLowerCase();
+                            const matchesSearch = item.partId.toLowerCase().includes(searchLower) || 
+                                                 (part && part.name.toLowerCase().includes(searchLower)) ||
+                                                 (item.originalPartId && item.originalPartId.toLowerCase().includes(searchLower)) ||
+                                                 (originalPart && originalPart.name.toLowerCase().includes(searchLower));
+                            return matchesSearch;
                           })
-                          .map(part => {
-                            const qty = inventory.find(i => i.partId === part.id && i.stageId === selectedStageDetail && i.location === 'OUT')?.quantity || 0;
-                            const displayQty = part.level === 3 ? qty.toFixed(4) : qty;
+                          .map((item, idx) => {
+                            const partStr = item.partId;
+                            const part = parts.find(p => p.id === partStr || p.name === partStr);
+                            const originalPart = item.originalPartId ? parts.find(p => p.id === item.originalPartId || p.name === item.originalPartId) : null;
+                            const qty = item.quantity;
+                            const displayQty = (part?.level === 3 || originalPart?.level === 3) ? qty.toFixed(4) : qty;
+                            const displayUnit = part?.unit || originalPart?.unit || 'Bộ';
+
                             return (
-                              <tr key={part.id} className="hover:bg-white transition-colors">
+                              <tr key={`${item.partId}-${item.originalPartId}-${idx}`} className="hover:bg-white transition-colors">
                                 <td className="p-4">
-                                  <div className="font-bold text-base">{getProcessValue(part.id, part, selectedStageDetail, 'OUT')}</div>
-                                  <div className="text-xs opacity-50">{getProcessValue(part.name, part, selectedStageDetail, 'OUT')}</div>
+                                  <div className="font-bold text-base">{getProcessValue(part?.name || item.partId, part, selectedStageDetail, 'OUT')}</div>
+                                  <div className="text-xs opacity-50 flex flex-wrap gap-2 items-center">
+                                    {getProcessValue(part?.id || item.partId, part, selectedStageDetail, 'OUT')}
+                                    {item.originalPartId && (
+                                      <span className="px-1.5 py-0.5 bg-orange-50 text-orange-600 rounded text-[10px] font-medium border border-orange-100">
+                                        Nguồn: {originalPart?.name || item.originalPartId} ({originalPart?.id || item.originalPartId})
+                                      </span>
+                                    )}
+                                  </div>
                                 </td>
                                 <td className="p-4 text-right">
                                   <div className="flex items-center justify-end gap-3">
                                     <span className="font-mono font-bold text-xl text-[#F27D26]">{displayQty}</span>
-                                    <span className="text-xs font-mono opacity-40 uppercase mr-4">{part.unit}</span>
+                                    <span className="text-xs font-mono opacity-40 uppercase mr-4">{displayUnit}</span>
+                                    <button 
+                                      onClick={() => setDefectModal({ partId: item.partId, stageId: selectedStageDetail })}
+                                      className="p-2 hover:bg-red-50 text-red-600 rounded-lg transition-colors"
+                                      title="Báo lỗi (NG)"
+                                    >
+                                      <AlertCircle size={16} />
+                                    </button>
                                     <button 
                                       onClick={() => {
                                         const pwd = prompt('Nhập mật khẩu để sửa tồn kho:');
                                         if (pwd === 'admin123') {
-                                          const newQty = prompt(`Nhập số lượng tồn mới cho ${part.id}:`, String(qty));
+                                          const newQty = prompt(`Nhập số lượng tồn mới cho ${item.partId}:`, String(qty));
                                           if (newQty !== null) {
-                                            storageService.setInventoryQuantity(part.id, selectedStageDetail, 'OUT', parseFloat(newQty) || 0);
+                                            storageService.setInventoryQuantity(item.partId, selectedStageDetail, 'OUT', parseFloat(newQty) || 0, item.originalPartId);
                                             refreshData();
                                           }
                                         } else if (pwd !== null) {
@@ -1740,8 +2756,8 @@ function DashboardView({ inventory, parts, refreshData }: DashboardProps) {
                                       onClick={() => {
                                         const pwd = prompt('Nhập mật khẩu để xóa tồn kho:');
                                         if (pwd === 'admin123') {
-                                          if (confirm(`Bạn có chắc chắn muốn xóa tồn kho của ${part.id} tại ${STAGES.find(s => s.id === selectedStageDetail)?.name} (Kho OUT)?`)) {
-                                            storageService.deleteInventoryItem(part.id, selectedStageDetail, 'OUT');
+                                          if (confirm(`Bạn có chắc chắn muốn xóa tồn kho của ${item.partId} tại ${STAGES.find(s => s.id === selectedStageDetail)?.name} (Kho OUT)?`)) {
+                                            storageService.deleteInventoryItem(item.partId, selectedStageDetail, 'OUT', item.originalPartId);
                                             refreshData();
                                           }
                                         } else if (pwd !== null) {
@@ -1762,94 +2778,195 @@ function DashboardView({ inventory, parts, refreshData }: DashboardProps) {
                     </table>
                   </div>
                 </div>
+
+                {/* KHO_NG Detail */}
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2 px-2">
+                    <div className="w-3 h-3 rounded-full bg-red-500" />
+                    <h3 className="font-mono text-base font-bold uppercase tracking-widest opacity-80 text-gray-900">KHO_NG (Hàng lỗi)</h3>
+                  </div>
+                  <div className="bg-gray-50 rounded-2xl border border-gray-100 overflow-hidden">
+                    <table className="w-full text-left border-collapse">
+                      <thead>
+                        <tr className="border-b border-gray-200 bg-gray-100/50">
+                          <th className="p-4 text-sm font-mono uppercase opacity-60 text-gray-900">Linh kiện</th>
+                          <th className="p-4 text-sm font-mono uppercase opacity-60 text-right text-gray-900">Số lượng</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {inventory
+                          .filter(item => item.stageId === selectedStageDetail && item.location === 'DEFECT' && item.quantity > 0)
+                          .filter(item => {
+                            const partStr = item.partId;
+                            const part = parts.find(p => p.id === partStr || p.name === partStr);
+                            const originalPart = item.originalPartId ? parts.find(p => p.id === item.originalPartId || p.name === item.originalPartId) : null;
+                            const searchLower = searchTerm.toLowerCase();
+                            const matchesSearch = item.partId.toLowerCase().includes(searchLower) || 
+                                                 (part && part.name.toLowerCase().includes(searchLower)) ||
+                                                 (item.originalPartId && item.originalPartId.toLowerCase().includes(searchLower)) ||
+                                                 (originalPart && originalPart.name.toLowerCase().includes(searchLower));
+                            return matchesSearch;
+                          })
+                          .map((item, idx) => {
+                            const partStr = item.partId;
+                            const part = parts.find(p => p.id === partStr || p.name === partStr);
+                            const originalPart = item.originalPartId ? parts.find(p => p.id === item.originalPartId || p.name === item.originalPartId) : null;
+                            const qty = item.quantity;
+                            const displayQty = (part?.level === 3 || originalPart?.level === 3) ? qty.toFixed(4) : qty;
+                            const displayUnit = part?.unit || originalPart?.unit || 'Bộ';
+
+                            return (
+                              <tr key={`${item.partId}-${item.originalPartId}-${idx}`} className="hover:bg-white transition-colors">
+                                <td className="p-4">
+                                  <div className="font-bold text-base text-gray-900">{getProcessValue(part?.name || item.partId, part, selectedStageDetail || STAGES[0].id, 'OUT')}</div>
+                                  <div className="text-xs opacity-50 text-gray-900 flex flex-wrap gap-2 items-center">
+                                    {getProcessValue(part?.id || item.partId, part, selectedStageDetail || STAGES[0].id, 'OUT')}
+                                    {item.originalPartId && (
+                                      <span className="px-1.5 py-0.5 bg-red-100 text-red-600 rounded text-[10px] font-medium border border-red-200">
+                                        Nguồn: {originalPart?.name || item.originalPartId} ({originalPart?.id || item.originalPartId})
+                                      </span>
+                                    )}
+                                  </div>
+                                </td>
+                                <td className="p-4 text-right">
+                                  <div className="flex items-center justify-end gap-3">
+                                    <span className="font-mono font-bold text-xl text-red-600">{displayQty}</span>
+                                    <span className="text-xs font-mono opacity-40 uppercase mr-4 text-gray-900">{displayUnit}</span>
+                                    <button 
+                                      onClick={() => {
+                                        const pwd = prompt('Nhập mật khẩu để sửa tồn kho lỗi:');
+                                        if (pwd === 'admin123') {
+                                          const newQty = prompt(`Nhập số lượng tồn mới cho ${item.partId} (Lỗi):`, String(qty));
+                                          if (newQty !== null) {
+                                            storageService.setInventoryQuantity(item.partId, selectedStageDetail || STAGES[0].id, 'DEFECT', parseFloat(newQty) || 0, item.originalPartId);
+                                            refreshData();
+                                          }
+                                        } else if (pwd !== null) {
+                                          alert('Mật khẩu không chính xác!');
+                                        }
+                                      }}
+                                      className="p-2 hover:bg-red-50 text-red-600 rounded-lg transition-colors"
+                                      title="Sửa tồn lỗi"
+                                    >
+                                      <Edit2 size={16} />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        {inventory.filter(item => item.stageId === selectedStageDetail && item.location === 'DEFECT' && item.quantity > 0).length === 0 && (
+                          <tr>
+                            <td colSpan={2} className="p-8 text-center text-gray-400 italic text-sm">Không có hàng lỗi tại công đoạn này.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               </div>
             </div>
           </motion.div>
         ) : null}
       </AnimatePresence>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {/* Chart Area */}
-        <div className="lg:col-span-2 bg-white p-8 rounded-2xl border border-gray-200 shadow-sm">
-          <div className="flex justify-between items-center mb-8">
-            <h2 className="font-bold text-2xl tracking-tight">Biểu đồ tồn kho WIP</h2>
-            <div className="flex gap-6">
-              <div className="flex items-center gap-3">
-                <div className="w-4 h-4 rounded-full bg-blue-500" />
-                <span className="text-sm font-mono uppercase opacity-60">Chờ SX (IN)</span>
+      <div className="bg-white p-8 rounded-2xl border border-gray-200 shadow-sm w-full">
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
+          <h2 className="font-bold text-2xl tracking-tight">Năng lực sản xuất theo giờ</h2>
+          <div className="flex items-center gap-6 flex-wrap">
+            <div className="flex items-center gap-3 bg-gray-50 border border-gray-200 rounded-lg px-4 py-2">
+              <span className="text-sm font-bold uppercase opacity-60">Ngày:</span>
+              <input 
+                type="date"
+                value={chartDate}
+                onChange={(e) => setChartDate(e.target.value)}
+                className="bg-transparent border-none outline-none font-bold text-[#F27D26] cursor-pointer"
+              />
+            </div>
+            
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2">
+                <div className="w-4 h-4 rounded bg-[#3B82F6]" />
+                <span className="text-sm font-mono uppercase opacity-60">Cắt Laser</span>
               </div>
-              <div className="flex items-center gap-3">
-                <div className="w-4 h-4 rounded-full bg-[#F27D26]" />
-                <span className="text-sm font-mono uppercase opacity-60">Hoàn thành (OUT)</span>
+              <div className="flex items-center gap-2">
+                <div className="w-4 h-4 rounded bg-[#F27D26]" />
+                <span className="text-sm font-mono uppercase opacity-60">Chấn/Dập</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="w-4 h-4 rounded bg-[#10B981]" />
+                <span className="text-sm font-mono uppercase opacity-60">Hàn</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="w-4 h-4 rounded bg-[#8B5CF6]" />
+                <span className="text-sm font-mono uppercase opacity-60">Sơn</span>
               </div>
             </div>
           </div>
-          <div className="h-80 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartData} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F0F0F0" />
-                <XAxis 
-                  dataKey="name" 
-                  axisLine={false} 
-                  tickLine={false} 
-                  tick={{ fontSize: 14, fontWeight: 600 }} 
-                />
-                <YAxis 
-                  axisLine={false} 
-                  tickLine={false} 
-                  tick={{ fontSize: 14, fontFamily: 'monospace' }} 
-                />
-                <Tooltip 
-                  cursor={{ fill: '#F3F4F6' }}
-                  contentStyle={{ 
-                    backgroundColor: '#FFFFFF', 
-                    border: '1px solid #E5E7EB', 
-                    borderRadius: '12px',
-                    color: '#111827',
-                    fontFamily: 'monospace',
-                    fontSize: '14px',
-                    padding: '16px',
-                    boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)'
-                  }} 
-                />
-                <Bar dataKey="Chờ SX (IN)" fill="#3B82F6" radius={[6, 6, 0, 0]} barSize={40} />
-                <Bar dataKey="Hoàn thành (OUT)" fill="#F27D26" radius={[6, 6, 0, 0]} barSize={40} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
         </div>
-
-        {/* Details Table */}
-        <div className="bg-white p-8 rounded-2xl border border-gray-200 shadow-sm flex flex-col">
-          <h2 className="font-bold text-2xl tracking-tight mb-8">Trạng thái chi tiết</h2>
-          <div className="flex-1 space-y-6 overflow-y-auto pr-2">
-            {STAGES.map(stage => (
-              <div key={stage.id} className="p-6 rounded-xl bg-gray-50 border border-gray-100">
-                <div className="flex justify-between items-center mb-4">
-                  <span className="font-bold text-lg">{stage.name}</span>
-                  <span className="text-xs font-mono bg-gray-200 px-3 py-1 rounded uppercase">Active</span>
-                </div>
-                <div className="grid grid-cols-2 gap-6">
-                  <div className="bg-white p-4 rounded-lg border border-gray-100">
-                    <span className="text-xs font-mono uppercase opacity-40 block mb-1">KHO_IN</span>
-                    <span className="text-2xl font-mono font-bold">
-                      {inventory
-                        .filter(item => item.stageId === stage.id && item.location === 'IN')
-                        .reduce((sum, item) => sum + item.quantity, 0)}
-                    </span>
-                  </div>
-                  <div className="bg-white p-4 rounded-lg border border-gray-100">
-                    <span className="text-xs font-mono uppercase opacity-40 block mb-1">KHO_OUT</span>
-                    <span className="text-2xl font-mono font-bold text-[#F27D26]">
-                      {inventory
-                        .filter(item => item.stageId === stage.id && item.location === 'OUT')
-                        .reduce((sum, item) => sum + item.quantity, 0)}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
+        <div className="h-96 w-full">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={productionChartData} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E7EB" />
+              <XAxis 
+                dataKey="name" 
+                axisLine={false} 
+                tickLine={false} 
+                tick={{ fontSize: 12, fontWeight: 700 }} 
+                dy={10}
+              />
+              <YAxis 
+                axisLine={false} 
+                tickLine={false} 
+                tick={{ fontSize: 12, fontFamily: 'monospace', fontWeight: 600 }} 
+                dx={-10}
+              />
+              <Tooltip 
+                cursor={{ fill: '#F9FAFB' }}
+                content={({ active, payload, label }: any) => {
+                  if (active && payload && payload.length) {
+                    const data = payload[0].payload;
+                    return (
+                      <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-xl text-sm text-gray-800 min-w-[200px]">
+                        <h4 className="font-bold border-b border-gray-100 pb-2 mb-3 text-lg opacity-80">{label}</h4>
+                        {payload.map((entry: any, index: number) => {
+                          if (entry.value === 0) return null;
+                          const stageDetails = data.details[entry.dataKey] || [];
+                          return (
+                            <div key={index} className="mb-4 last:mb-0">
+                              <div className="font-bold flex items-center justify-between mb-2">
+                                <div className="flex items-center gap-2" style={{ color: entry.color }}>
+                                  <div className="w-3 h-3 rounded" style={{ backgroundColor: entry.color }} />
+                                  <span className="uppercase tracking-widest">{entry.dataKey}</span>
+                                </div>
+                                <span className="font-mono bg-gray-100 px-2 py-0.5 rounded text-xs">{entry.value} TOTAL</span>
+                              </div>
+                              <div className="pl-5 space-y-2">
+                                {stageDetails.map((detail: any, idx: number) => (
+                                  <div key={idx} className="flex justify-between items-start text-xs text-gray-600 gap-6">
+                                    <span className="break-words flex-1 leading-tight">{detail.partName}</span>
+                                    <div className="flex items-center gap-1">
+                                      <span className="font-mono font-bold bg-gray-50 px-1.5 py-0.5 rounded border border-gray-100">{detail.quantity}</span>
+                                      <span className="text-[10px] opacity-60 font-medium whitespace-nowrap">{detail.unit}</span>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  }
+                  return null;
+                }}
+              />
+              <Bar dataKey="Cắt Laser" fill="#3B82F6" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="Chấn/Dập" fill="#F27D26" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="Hàn" fill="#10B981" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="Sơn" fill="#8B5CF6" radius={[4, 4, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
         </div>
       </div>
     </motion.div>
@@ -1863,9 +2980,12 @@ function ProduceView({
   handleProduce,
   lastTransaction, setLastTransaction,
   inventory,
+  productionOrders,
   parts,
   onPrint,
-  onCopy
+  onCopy,
+  setDefectModal,
+  labelSettings
 }: any) {
   const [sourceLocation, setSourceLocation] = useState<'IN' | 'OUT'>('IN');
   const [selectedPoId, setSelectedPoId] = useState<string>("");
@@ -1873,45 +2993,105 @@ function ProduceView({
     (STAGES.find(s => s.id === selectedStage)?.nextStageId || '') as StageId
   );
 
-  // Filter parts based on stage and BOM level
-  const filteredParts = parts.filter((p: any) => {
-    if (selectedStage === 'LASER') {
-      return sourceLocation === 'IN' ? p.level === 3 : p.level === 2;
-    }
-    if (selectedStage === 'BENDING') {
-      return p.level === 2 && !p.skipBending;
-    }
-    if (selectedStage === 'WELDING') {
-      return (sourceLocation === 'IN' ? p.level === 2 : p.level === 1) && !p.skipWelding;
-    }
-    if (selectedStage === 'PAINTING') return p.level === 1;
-    return true;
-  });
+  const allAvailablePos = useMemo(() => {
+    return productionOrders.filter(p => {
+      if (p.stageId !== selectedStage || p.status === 'COMPLETED') return false;
+      
+      if (sourceLocation === 'IN') {
+        return p.producedQuantity < p.targetQuantity;
+      } else {
+        // Allow exporting if there's stock available manually, so we just check against targetQuantity
+        return (p.exportedQuantity || 0) < p.targetQuantity;
+      }
+    });
+  }, [selectedStage, sourceLocation, productionOrders]);
 
-  const availablePos = storageService.getProductionOrders().filter(p => {
-    if (p.partId !== selectedPart || p.stageId !== selectedStage || p.status === 'COMPLETED') return false;
-    
-    if (sourceLocation === 'IN') {
-      return p.producedQuantity < p.targetQuantity;
-    } else {
-      return (p.exportedQuantity || 0) < p.producedQuantity;
+  // Filter parts based on stage, BOM level, and selected PO
+  const filteredParts = React.useMemo(() => {
+    let baseParts = parts;
+
+    // Inject pseudo parts if we are looking at Glazing OUT
+    if (selectedStage === 'GLAZING' && sourceLocation === 'OUT') {
+      // Show ONLY items that actually have inventory in GLAZING OUT
+      const glzInv = inventory.filter(i => i.stageId === 'GLAZING' && i.location === 'OUT' && i.quantity > 0);
+      return glzInv.map(i => {
+        const isPseudo = i.partId.startsWith('GLZ-OUT-');
+        const name = isPseudo ? i.partId.replace('GLZ-OUT-', '') : (parts.find(p => p.id === i.partId)?.name || i.partId);
+        return {
+          id: i.partId,
+          name: name,
+          level: 1,
+          skipLaser: false, skipBending: false, skipWelding: false, skipPainting: false
+        };
+      });
+    } else if (selectedStage === 'GLAZING') {
+      // For GLAZING IN, just return empty because we don't 'produce' IN using this view normally
+      return [];
     }
-  });
+
+    return baseParts.filter((p: any) => {
+      if (selectedPoId) {
+        const selectedPo = allAvailablePos.find(po => po.id === selectedPoId);
+        // Only restrict by selected PO strictly if not PAINTING or if we want to enforce it.
+        // Wait, if a PO is selected, we should filter by it regardless.
+        if (selectedPo && p.id !== selectedPo.partId) return false;
+      } else {
+        const hasAvailablePo = allAvailablePos.some(po => po.partId === p.id);
+        // Do not require a PO for GLAZING, or for PAINTING IN -> OUT
+        const isPaintingExempt = selectedStage === 'PAINTING' && sourceLocation === 'IN';
+        // Allow if they have stock manually added or left over
+        const hasInventory = inventory.some((i: any) => {
+          if (i.stageId !== selectedStage || i.location !== sourceLocation || i.quantity <= 0) return false;
+          const itEffectiveId = storageService.getEffectivePartId(i.partId, selectedStage, selectedPoId).toUpperCase();
+          const targetId = p.id.toUpperCase();
+          return i.partId.toUpperCase() === targetId || itEffectiveId === targetId;
+        });
+        if (!hasAvailablePo && selectedStage !== 'GLAZING' && !isPaintingExempt && !hasInventory) return false; 
+      }
+
+      if (selectedStage === 'LASER') {
+        return (sourceLocation === 'IN' ? p.level === 3 : p.level === 2) && !p.skipLaser;
+      }
+      if (selectedStage === 'BENDING') {
+        return p.level === 2 && !p.skipBending;
+      }
+      if (selectedStage === 'WELDING') {
+        return (sourceLocation === 'IN' ? p.level === 2 : p.level === 1) && !p.skipWelding;
+      }
+      if (selectedStage === 'PAINTING') return (p.level === 1 || p.hasPaintingPO) && !p.skipPainting;
+      
+      return true;
+    });
+  }, [parts, inventory, selectedStage, sourceLocation, selectedPoId, allAvailablePos]);
+
+  const availablePos = allAvailablePos.filter(p => p.partId === selectedPart);
+
+  // Handlers for selection
+  const handlePartChange = (partId: string) => {
+    setSelectedPart(partId);
+    const pos = allAvailablePos.filter(p => p.partId === partId);
+    setSelectedPoId(pos.length > 0 ? pos[0].id : "");
+  };
+
+  const handlePoChange = (poId: string) => {
+    setSelectedPoId(poId);
+    if (poId) {
+      const po = allAvailablePos.find(p => p.id === poId);
+      if (po && po.partId !== selectedPart) {
+        setSelectedPart(po.partId);
+      }
+    }
+  };
 
   // Auto-select first filtered part if current selection is not in list
   useEffect(() => {
     if (filteredParts.length > 0 && !filteredParts.find((p: any) => p.id === selectedPart)) {
-      setSelectedPart(filteredParts[0].id);
+      const firstPartId = filteredParts[0].id;
+      setSelectedPart(firstPartId);
+      const pos = allAvailablePos.filter(p => p.partId === firstPartId);
+      setSelectedPoId(pos.length > 0 ? pos[0].id : "");
     }
-  }, [selectedStage, filteredParts, selectedPart, setSelectedPart]);
-
-  useEffect(() => {
-    if (availablePos.length > 0) {
-      setSelectedPoId(availablePos[0].id);
-    } else {
-      setSelectedPoId("");
-    }
-  }, [selectedPart, selectedStage, availablePos.length]);
+  }, [selectedStage, filteredParts, selectedPart, allAvailablePos]);
 
   useEffect(() => {
     const currentIdx = STAGES.findIndex(s => s.id === selectedStage);
@@ -1920,28 +3100,43 @@ function ProduceView({
     // Find the next non-skipped stage
     const nextAvailableStage = STAGES.find((s, idx) => {
       if (idx <= currentIdx) return false;
+      if (s.id === 'LASER' && part?.skipLaser) return false;
       if (s.id === 'BENDING' && part?.skipBending) return false;
       if (s.id === 'WELDING' && part?.skipWelding) return false;
+      if (s.id === 'PAINTING' && part?.skipPainting) return false;
       return true;
     });
 
     if (nextAvailableStage) {
       setTargetStageId(nextAvailableStage.id);
-    } else if (selectedStage === 'PAINTING') {
-      setTargetStageId('DCLR');
     } else {
-      setTargetStageId('' as StageId);
+      setTargetStageId('' as StageId); // End of line
     }
     
     // Auto-switch to OUT for stages with automatic BOM deduction
-    if (selectedStage === 'LASER' || selectedStage === 'WELDING') {
+    if (selectedStage === 'LASER' || selectedStage === 'WELDING' || selectedStage === 'GLAZING') {
       setSourceLocation('OUT');
     }
   }, [selectedStage, selectedPart, sourceLocation, parts]);
 
-  const currentStock = inventory.find(
-    (i: any) => i.partId === selectedPart && i.stageId === selectedStage && i.location === sourceLocation
-  )?.quantity || 0;
+  const currentStock = useMemo(() => {
+    const cleanId = selectedPart.split(' - ')[0].trim().toUpperCase();
+    const effectiveId = storageService.getEffectivePartId(cleanId, selectedStage, selectedPoId);
+    
+    return inventory.reduce((sum: number, item: any) => {
+      if (item.stageId === selectedStage && item.location === sourceLocation) {
+        const itPartId = item.partId.toUpperCase();
+        const targetId = effectiveId.toUpperCase();
+        const partInCatalog = parts.find((p: any) => p.id.toUpperCase() === targetId);
+        const targetName = partInCatalog ? partInCatalog.name.toUpperCase() : '';
+
+        if (itPartId === targetId || (targetName && itPartId === targetName)) {
+          return sum + item.quantity;
+        }
+      }
+      return sum;
+    }, 0);
+  }, [inventory, selectedPart, selectedStage, sourceLocation, selectedPoId]);
 
   const activePo = availablePos.find(p => p.id === selectedPoId) || availablePos[0];
 
@@ -1974,7 +3169,14 @@ function ProduceView({
           <p className="text-lg text-gray-500">Ghi nhận hoàn thành công đoạn hoặc xuất linh kiện từ kho thành phẩm để in nhãn QR.</p>
         </div>
         
-        <form onSubmit={(e) => handleProduce(e, sourceLocation, sourceLocation === 'OUT' ? targetStageId : undefined, selectedPoId)} className="space-y-8">
+        <form onSubmit={(e) => {
+          if (quantity > currentStock + 0.0001) {
+            alert(`Số lượng xuất (${quantity}) vượt quá tồn kho hiện tại (${currentStock})`);
+            e.preventDefault();
+            return;
+          }
+          handleProduce(e, sourceLocation, sourceLocation === 'OUT' ? targetStageId : undefined, selectedPoId);
+        }} className="space-y-8">
           <div className="grid grid-cols-2 gap-8">
             <div className="space-y-4">
               <label className="text-base font-bold uppercase tracking-widest opacity-70">1. Công đoạn hiện tại</label>
@@ -2017,37 +3219,35 @@ function ProduceView({
             </div>
           </div>
 
+          {allAvailablePos.length > 0 && (
+            <div className="space-y-4">
+              <label className="text-base font-bold uppercase tracking-widest opacity-80">3. Chọn Lệnh PO (Tiến độ)</label>
+              <SearchableSelect 
+                options={allAvailablePos.map(po => ({
+                  id: po.id,
+                  label: `${po.id.startsWith('REPAIR') ? '🛠️ [BÙ] ' : ''}${po.id} - ${getProcessValue(parts.find((p: any) => p.id === po.partId)?.name || po.partId, parts.find((p: any) => p.id === po.partId), selectedStage, sourceLocation)} (${sourceLocation === 'IN' ? po.producedQuantity : po.exportedQuantity || 0}/${po.targetQuantity})`
+                }))}
+                value={selectedPoId}
+                onChange={handlePoChange}
+                placeholder="Tìm Lệnh PO..."
+              />
+            </div>
+          )}
+
           <div className="space-y-4">
-            <label className="text-base font-bold uppercase tracking-widest opacity-80">3. Chọn mã linh kiện</label>
+            <label className="text-sm font-bold uppercase tracking-widest opacity-50">4. Chọn mã linh kiện</label>
             <SearchableSelect 
               options={filteredParts.map((p: any) => ({ 
                 id: p.id, 
                 label: `${getProcessValue(p.id, p, selectedStage, sourceLocation)} - ${getProcessValue(p.name, p, selectedStage, sourceLocation)}` 
               }))}
               value={selectedPart}
-              onChange={setSelectedPart}
+              onChange={handlePartChange}
               placeholder="Tìm mã linh kiện..."
             />
           </div>
 
-          {availablePos.length > 0 && (
-            <div className="space-y-4">
-              <label className="text-sm font-bold uppercase tracking-widest opacity-50">Chọn Lệnh PO (Tiến độ)</label>
-              <select 
-                value={selectedPoId}
-                onChange={(e) => setSelectedPoId(e.target.value)}
-                className="w-full p-5 rounded-xl border-2 border-gray-100 font-bold text-lg focus:border-blue-600 outline-none bg-white cursor-pointer"
-              >
-                {availablePos.map(po => (
-                  <option key={po.id} value={po.id}>
-                    {po.id} ({sourceLocation === 'IN' ? po.producedQuantity : po.exportedQuantity || 0}/{po.targetQuantity})
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          {sourceLocation === 'OUT' && selectedStage !== 'PAINTING' && (
+          {sourceLocation === 'OUT' && (
             <div className="space-y-4">
               <label className="text-sm font-bold uppercase tracking-widest opacity-50">4. Công đoạn đích (Nhập kho IN)</label>
               <select 
@@ -2055,31 +3255,11 @@ function ProduceView({
                 onChange={(e) => setTargetStageId(e.target.value as StageId)}
                 className="w-full p-5 rounded-xl border-2 border-gray-100 font-bold text-lg focus:border-blue-600 outline-none bg-white cursor-pointer"
               >
-                {STAGES.filter((s, idx) => {
-                  const currentIdx = STAGES.findIndex(st => st.id === selectedStage);
-                  const part = parts.find((p: any) => p.id === selectedPart);
-                  
-                  // Only show stages after the current one
-                  if (idx <= currentIdx) return false;
-
-                  // Filter out skipped stages based on part configuration
-                  if (s.id === 'BENDING' && part?.skipBending) return false;
-                  if (s.id === 'WELDING' && part?.skipWelding) return false;
-
-                  return true;
-                }).map(stage => (
-                  <option key={stage.id} value={stage.id}>{stage.name}</option>
+                {STAGES.map(s => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
                 ))}
+                <option value="">Kết thúc (Thành phẩm)</option>
               </select>
-            </div>
-          )}
-
-          {sourceLocation === 'OUT' && selectedStage === 'PAINTING' && (
-            <div className="space-y-4">
-              <label className="text-sm font-bold uppercase tracking-widest opacity-50">4. Công đoạn đích (Nhập kho IN)</label>
-              <div className="w-full p-5 rounded-xl border-2 border-gray-100 font-bold text-lg bg-gray-50 text-gray-500">
-                DCLR (Mặc định)
-              </div>
             </div>
           )}
 
@@ -2126,13 +3306,41 @@ function ProduceView({
             </div>
           </div>
 
-          <button 
-            type="submit"
-            className="w-full bg-blue-600 text-white py-5 rounded-xl font-bold uppercase tracking-widest flex items-center justify-center gap-3 hover:bg-blue-700 active:scale-[0.98] transition-all shadow-lg shadow-blue-200"
-          >
-            <PackagePlus size={24} />
-            {sourceLocation === 'IN' ? 'Xác nhận hoàn thành (IN -> OUT)' : 'Xác nhận xuất kho & In nhãn QR'}
-          </button>
+          {availablePos.length === 0 && selectedStage !== 'GLAZING' && !(selectedStage === 'PAINTING' && sourceLocation === 'IN') ? (
+            <div className="w-full bg-red-50 border-2 border-red-200 p-6 rounded-xl flex flex-col items-center gap-3 text-center">
+              <AlertCircle size={32} className="text-red-600" />
+              <div>
+                <p className="font-bold text-red-800 uppercase text-lg">Không có Lệnh sản xuất (PO)</p>
+                <p className="text-sm text-red-600">Linh kiện này chưa được tạo PO cho công đoạn {STAGES.find(s => s.id === selectedStage)?.name}. Vui lòng vào mục "Lệnh sản xuất" để tạo lệnh trước.</p>
+              </div>
+            </div>
+          ) : (
+            <div className="flex gap-4">
+              <button 
+                type="submit"
+                disabled={!selectedPoId && selectedStage !== 'GLAZING' && !(selectedStage === 'PAINTING' && sourceLocation === 'IN')}
+                className={cn(
+                  "flex-1 py-5 rounded-xl font-bold uppercase tracking-widest flex items-center justify-center gap-3 active:scale-[0.98] transition-all shadow-lg",
+                  (!selectedPoId && selectedStage !== 'GLAZING' && !(selectedStage === 'PAINTING' && sourceLocation === 'IN'))
+                    ? "bg-gray-300 text-gray-500 cursor-not-allowed" 
+                    : (selectedStage === 'LASER' || selectedStage === 'WELDING' || sourceLocation === 'IN' ? "bg-blue-600 text-white hover:bg-blue-700 shadow-blue-200" : "bg-[#F27D26] text-white hover:bg-[#F27D26]/90 shadow-[#F27D26]/20")
+                )}
+              >
+                {sourceLocation === 'IN' ? <CheckCircle2 size={24} /> : <Printer size={24} />}
+                {sourceLocation === 'IN' ? 'Xác nhận hoàn thành' : 'In nhãn QR'}
+              </button>
+              {sourceLocation === 'IN' && (
+                <button 
+                  type="button"
+                  onClick={() => setDefectModal({ partId: selectedPart, stageId: selectedStage, poId: selectedPoId })}
+                  className="w-32 py-5 rounded-xl border border-red-200 bg-red-50 text-red-600 font-bold uppercase text-[10px] flex flex-col items-center justify-center gap-1 hover:bg-red-100 transition-all active:scale-[0.98] shadow-lg shadow-red-50"
+                >
+                  <AlertCircle size={20} />
+                  Báo lỗi (NG)
+                </button>
+              )}
+            </div>
+          )}
         </form>
       </div>
 
@@ -2157,103 +3365,137 @@ function ProduceView({
                 </button>
               </div>
               
-              <div id="qr-label-display" className="w-[420px] bg-white border-2 border-black p-6 flex flex-col items-center">
+              <div id="qr-label-display" className="w-[420px] bg-white p-4 flex flex-col box-border">
+                <div className="w-full text-center pb-2">
+                  <h1 className="font-black uppercase tracking-tight text-sm text-black">PHIẾU ĐIỀU CHUYỂN</h1>
+                </div>
+                <div className="w-full flex-1 border-2 border-black flex flex-col items-center p-4">
                 {/* QR Section */}
-                <div className="mb-6 border-[3px] border-black p-1">
+                <div className="mt-1 mb-4 border-[3px] border-black p-1">
                   <QRCodeSVG value={lastTransaction.qrData || ''} size={240} level="H" />
                 </div>
 
                 {/* Part Info */}
-                <div className="w-full text-center mb-6">
-                  <h2 className="text-3xl font-black uppercase tracking-tight leading-none mb-2">
-                    {getProcessValue(parts.find(p => p.id === lastTransaction.partId)?.name, parts.find(p => p.id === lastTransaction.partId), lastTransaction.stageId, 'OUT')}
+                <div className="w-full text-center mb-6 text-black">
+                  <h2 className="text-4xl font-black uppercase tracking-tight leading-none mb-2 text-black">
+                    {lastTransaction.partName || getProcessValue(parts.find(p => p.id === lastTransaction.partId)?.name, parts.find(p => p.id === lastTransaction.partId), lastTransaction.stageId, 'OUT')}
                   </h2>
-                  <p className="font-mono text-lg font-bold opacity-80">
-                    Mã LK: {getProcessValue(lastTransaction.partId, parts.find(p => p.id === lastTransaction.partId), lastTransaction.stageId, 'OUT')}
+                  <p className="font-mono font-black mt-1 text-black break-words" style={{ fontSize: `${labelSettings.fontSize + 4}px` }}>
+                    Mã LK: {lastTransaction.partId}
                   </p>
                 </div>
 
                 {/* Main Stats */}
-                <div className="w-full grid grid-cols-2 border-t-[3px] border-black py-4">
+                <div className="w-full grid grid-cols-2 border-t-[3px] border-black py-4 text-black">
                   <div className="text-center border-r-[3px] border-black px-2 flex flex-col justify-center">
-                    <span className="text-[10px] font-bold uppercase opacity-60 mb-1">Số lượng:</span>
+                    <span className="text-[10px] font-black uppercase mb-1">Số lượng:</span>
                     <span className="text-3xl font-black">{lastTransaction.quantity} {parts.find(p => p.id === lastTransaction.partId)?.unit}</span>
                   </div>
                   <div className="text-center px-2 flex flex-col justify-center">
-                    <span className="text-[10px] font-bold uppercase opacity-60 mb-1">Từ công đoạn:</span>
-                    <span className="text-2xl font-black uppercase leading-tight">
+                    <span className="text-[10px] font-black uppercase mb-1 text-black">Từ công đoạn:</span>
+                    <span className="text-2xl font-black uppercase leading-tight text-black">
                       {STAGES.find(s => s.id === lastTransaction.stageId)?.name}
                     </span>
                   </div>
                 </div>
 
                 {/* Destination Box */}
-                <div className="w-full border-[3px] border-black rounded-lg p-4 my-4 text-center">
-                  <span className="text-[10px] font-bold uppercase opacity-60 block mb-2">Đích tiếp theo:</span>
+                <div className="w-full border-[3px] border-black rounded-lg p-4 my-4 text-center text-black">
+                  <span className="text-[10px] font-black uppercase block mb-2 text-black">Đích tiếp theo:</span>
                   <div className="flex items-center justify-center gap-4 font-black text-xl italic group">
                     <span>{STAGES.find(s => s.id === lastTransaction.stageId)?.name}</span>
-                    <ArrowRight size={24} strokeWidth={3} className="text-[#F27D26]" />
+                    <ArrowRight size={24} strokeWidth={3} className="text-black" />
                     <span>{STAGES.find(s => s.id === (lastTransaction.targetStageId || lastTransaction.qrData?.split('|')?.[5]))?.name || 
                            ((lastTransaction.targetStageId || lastTransaction.qrData?.split('|')?.[5]) === 'DCLR' ? 'Lắp ráp (DCLR)' : 'HOÀN THÀNH')}</span>
                   </div>
                 </div>
 
+                {/* Optional Glazing Times */}
+                {(lastTransaction as any).planId && (() => {
+                  const plan = storageService.getGlazingPlans().find(p => p.id === (lastTransaction as any).planId);
+                  if (plan) {
+                    return (
+                      <div className="w-full flex justify-between font-mono font-bold text-black border-t border-b border-black py-2 mb-2" style={{ fontSize: `${labelSettings.fontSize + 2}px` }}>
+                         <div className="flex flex-col text-left">
+                           <span className="text-[14px] uppercase font-black">HT Dự Kiến</span>
+                           <span>{plan.expectedCompletionTime ? format(plan.expectedCompletionTime, 'HH:mm dd/MM') : '--:--'}</span>
+                         </div>
+                         <div className="flex flex-col text-right">
+                           <span className="text-[14px] uppercase font-black">HT Thực Tế</span>
+                           <span>{format(lastTransaction.timestamp, 'HH:mm dd/MM')}</span>
+                         </div>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+
                 {/* PO Details Section */}
-                <div className="w-full space-y-1 mb-6 text-[11px] font-bold bg-gray-50 p-3 border border-black/10 rounded">
-                  <div className="flex justify-between items-center">
-                    <span className="opacity-50">LOẠI PO:</span>
+                <div className="mb-2 w-full space-y-1 text-[11px] font-black bg-transparent p-3 border-2 border-black rounded text-black">
+                  <div className="flex justify-between items-center text-black">
+                    <span className="uppercase text-black">LOẠI PO:</span>
                     {(() => {
                       const po = storageService.getProductionOrders().find(p => p.id === lastTransaction.poId);
                       return (
-                        <span className={cn(
-                          "px-2 py-0.5 rounded text-[9px] uppercase",
-                          po?.masterPoId ? "bg-blue-100 text-blue-700" : "bg-purple-100 text-purple-700"
-                        )}>
+                        <span className="px-2 py-0.5 rounded text-[9px] uppercase font-black text-black">
                           {po?.masterPoId ? 'PO Con (Sub)' : 'PO Tổng (Master)'}
                         </span>
                       );
                     })()}
                   </div>
-                  <div className="flex justify-between items-center">
-                    <span className="opacity-50 uppercase">Mã PO:</span>
-                    <span className="font-mono text-[12px]">{lastTransaction.poId || 'N/A'}</span>
+                  <div className="flex justify-between items-center text-black">
+                    <span className="uppercase text-black">Mã PO:</span>
+                    <span className="font-mono text-[12px] font-black text-black">{lastTransaction.poId || 'N/A'}</span>
                   </div>
-                  <div className="flex justify-between items-center text-[10px] text-gray-500 italic">
+                  <div className="flex justify-between items-center text-[10px] italic font-black text-black">
                     <span>Kế hoạch PO Con:</span>
                     <span>{lastTransaction.qrData?.split('|')?.[8] || storageService.getProductionOrders().find(p => p.id === lastTransaction.poId)?.targetQuantity || 0} linh kiện</span>
                   </div>
                   {(() => {
                     const po = storageService.getProductionOrders().find(p => p.id === lastTransaction.poId);
                     const masterId = po?.masterPoId || lastTransaction.qrData?.split('|')?.[7];
-                    return masterId && (
+                    return (
                       <>
-                        <div className="flex justify-between items-center">
-                          <span className="opacity-50 uppercase">Thuộc PO Tổng:</span>
-                          <span className="font-mono text-[12px] text-red-600">{masterId}</span>
-                        </div>
-                        <div className="flex justify-between items-center text-[10px] text-gray-500 italic">
-                          <span>Kế hoạch PO Tổng:</span>
-                          <span>{lastTransaction.qrData?.split('|')?.[9] || storageService.getProductionOrders().find(p => p.id === masterId)?.targetQuantity || 0} máy</span>
-                        </div>
+                        {po?.plannedStartTime && (
+                          <div className="flex justify-between items-center pt-1 border-t border-black text-black">
+                            <span className="uppercase text-black font-black">KH Bắt đầu PO:</span>
+                            <span className="font-mono font-black text-black">{format(po.plannedStartTime, 'dd/MM HH:mm')}</span>
+                          </div>
+                        )}
+                        {po?.expectedCompletionTime && (
+                          <div className="flex justify-between items-center text-black">
+                            <span className="uppercase text-black font-black">KH Kết thúc PO:</span>
+                            <span className="font-mono font-black text-black">{format(po.expectedCompletionTime, 'dd/MM HH:mm')}</span>
+                          </div>
+                        )}
+                        {masterId && (
+                          <>
+                            <div className="flex justify-between items-center pt-1 border-t border-black text-black">
+                              <span className="uppercase font-black text-black">PO TỔNG:</span>
+                              <span className="font-mono text-[12px] font-black text-black">{masterId}</span>
+                            </div>
+                            <div className="flex justify-between items-center text-[10px] italic text-black font-black">
+                              <span>Kế hoạch PO Tổng:</span>
+                              <span>{lastTransaction.qrData?.split('|')?.[9] || storageService.getProductionOrders().find(p => p.id === masterId)?.targetQuantity || 0} máy</span>
+                            </div>
+                          </>
+                        )}
                       </>
                     );
                   })()}
-                  <div className="flex justify-between items-center pt-1 border-t border-black/5 mt-1">
-                    <span className="opacity-50 uppercase">Bắt đầu đi:</span>
-                    <span className="font-mono">{format(lastTransaction.timestamp, 'HH:mm:ss')}</span>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="opacity-50 uppercase">Đến dự kiến:</span>
-                    <span className="font-mono">{format(lastTransaction.timestamp, 'HH:mm:ss')}</span>
+                  <div className="flex justify-between items-center pt-1 border-t border-black mt-1 text-black">
+                    <span className="uppercase font-black text-black text-[9px]">Hoàn thành thực tế:</span>
+                    <span className="font-mono font-black text-black">{format(lastTransaction.timestamp, 'dd/MM/yyyy HH:mm:ss')}</span>
                   </div>
                 </div>
 
-                <div className="w-full border-t-[3px] border-black pt-4 flex justify-between items-end">
-                  <div className="flex flex-col text-[11px] font-mono leading-none">
-                    <span className="font-black mb-1">ID: {lastTransaction.id}</span>
-                    <span className="opacity-60">Thời gian: {format(lastTransaction.timestamp, 'dd/MM/yyyy HH:mm:ss')}</span>
+                <div className="w-full border-t-[3px] border-black pt-4 justify-between items-end text-black hidden">
+                  <div className="flex flex-col text-[11px] font-mono leading-none text-black">
+                    <span className="font-black mb-1 text-black">ID: {lastTransaction.id}</span>
+                    <span className="font-black text-black">Thời gian: {format(lastTransaction.timestamp, 'dd/MM/yyyy HH:mm:ss')}</span>
                   </div>
-                  <span className="text-[11px] font-black tracking-tighter italic opacity-40">WIP TRACKING</span>
+                  <span className="text-[11px] font-black tracking-tighter italic text-black">WIP TRACKING</span>
+                </div>
                 </div>
               </div>
 
@@ -2291,7 +3533,7 @@ function ProduceView({
   );
 }
 
-function WeldingInboundView({ parts, onManualInbound }: any) {
+function WeldingInboundView({ parts, onManualInbound, setDefectModal, productionOrders }: any) {
   const [manualPart, setManualPart] = useState('');
   const [manualQty, setManualQty] = useState(0);
   const [selectedPoId, setSelectedPoId] = useState<string>("");
@@ -2300,33 +3542,49 @@ function WeldingInboundView({ parts, onManualInbound }: any) {
   const selectedStage = 'WELDING';
   const targetLocation = 'OUT';
 
-  useEffect(() => {
-    if (parts.length > 0 && !manualPart) {
-      // For Welding OUT, Level 1 is result, but exclude parts skipping welding
-      const weldingParts = parts.filter((p: any) => p.level === 1 && !p.skipWelding);
-      if (weldingParts.length > 0) setManualPart(weldingParts[0].id);
-    }
-  }, [parts]);
+  const allAvailablePos = useMemo(() => {
+    return (productionOrders || []).filter(
+      (p: any) => p.stageId === selectedStage && p.status !== 'COMPLETED'
+    );
+  }, [selectedStage, productionOrders]);
 
-  const filteredParts = parts.filter((p: any) => p.level === 1 && !p.skipWelding);
+  const filteredParts = parts.filter((p: any) => {
+    if (selectedPoId) {
+      const selectedPo = allAvailablePos.find(po => po.id === selectedPoId);
+      if (selectedPo && p.id !== selectedPo.partId) return false;
+    } else {
+      const hasAvailablePo = allAvailablePos.some(po => po.partId === p.id);
+      if (!hasAvailablePo) return false;
+    }
+    return p.level === 1 && !p.skipWelding;
+  });
+
+  const availablePos = allAvailablePos.filter(p => p.partId === manualPart);
+
+  const handlePartChange = (partId: string) => {
+    setManualPart(partId);
+    const pos = allAvailablePos.filter(p => p.partId === partId);
+    setSelectedPoId(pos.length > 0 ? pos[0].id : "");
+  };
+
+  const handlePoChange = (poId: string) => {
+    setSelectedPoId(poId);
+    if (poId) {
+      const po = allAvailablePos.find(p => p.id === poId);
+      if (po && po.partId !== manualPart) {
+        setManualPart(po.partId);
+      }
+    }
+  };
 
   useEffect(() => {
     if (filteredParts.length > 0 && !filteredParts.find((p: any) => p.id === manualPart)) {
-      setManualPart(filteredParts[0].id);
+      const firstPartId = filteredParts[0].id;
+      setManualPart(firstPartId);
+      const pos = allAvailablePos.filter(p => p.partId === firstPartId);
+      setSelectedPoId(pos.length > 0 ? pos[0].id : "");
     }
-  }, [filteredParts, manualPart]);
-
-  const availablePos = storageService.getProductionOrders().filter(
-    p => p.partId === manualPart && p.stageId === selectedStage && p.status !== 'COMPLETED'
-  );
-
-  useEffect(() => {
-    if (availablePos.length > 0) {
-      setSelectedPoId(availablePos[0].id);
-    } else {
-      setSelectedPoId("");
-    }
-  }, [manualPart, availablePos.length]);
+  }, [filteredParts, manualPart, allAvailablePos]);
 
   const handleManualSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -2393,6 +3651,21 @@ function WeldingInboundView({ parts, onManualInbound }: any) {
             </div>
           </div>
 
+          {allAvailablePos.length > 0 && (
+            <div className="space-y-4">
+              <label className="text-sm font-bold uppercase tracking-widest opacity-50">Chọn Lệnh PO (Tiến độ)</label>
+              <SearchableSelect 
+                options={allAvailablePos.map(po => ({
+                  id: po.id,
+                  label: `${po.id.startsWith('REPAIR') ? '🛠️ [BÙ] ' : ''}${po.id} - ${getProcessValue(parts.find((p: any) => p.id === po.partId)?.name || po.partId, parts.find((p: any) => p.id === po.partId), selectedStage, targetLocation)} (${po.producedQuantity}/${po.targetQuantity})`
+                }))}
+                value={selectedPoId}
+                onChange={handlePoChange}
+                placeholder="Tìm Lệnh PO..."
+              />
+            </div>
+          )}
+
           <div className="space-y-4">
             <label className="text-sm font-bold uppercase tracking-widest opacity-50">Chọn mã thành phẩm:</label>
             <SearchableSelect 
@@ -2401,27 +3674,10 @@ function WeldingInboundView({ parts, onManualInbound }: any) {
                 label: `${getProcessValue(p.id, p, selectedStage, targetLocation)} - ${getProcessValue(p.name, p, selectedStage, targetLocation)}` 
               }))}
               value={manualPart}
-              onChange={setManualPart}
+              onChange={handlePartChange}
               placeholder="Tìm kiếm..."
             />
           </div>
-
-          {targetLocation === 'OUT' && availablePos.length > 0 && (
-            <div className="space-y-4">
-              <label className="text-sm font-bold uppercase tracking-widest opacity-50">Chọn Lệnh PO (Tiến độ)</label>
-              <select 
-                value={selectedPoId}
-                onChange={(e) => setSelectedPoId(e.target.value)}
-                className="w-full p-5 rounded-xl border-2 border-gray-100 font-bold text-lg focus:border-blue-600 outline-none bg-white cursor-pointer"
-              >
-                {availablePos.map(po => (
-                  <option key={po.id} value={po.id}>
-                    {po.id} ({po.producedQuantity}/{po.targetQuantity})
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
 
           <div className="space-y-4">
             <div className="flex justify-between items-center">
@@ -2442,13 +3698,29 @@ function WeldingInboundView({ parts, onManualInbound }: any) {
             />
           </div>
 
-          <button 
-            type="submit"
-            className="w-full bg-blue-600 text-white py-6 rounded-xl font-bold uppercase tracking-widest flex items-center justify-center gap-4 hover:bg-blue-700 transition-all shadow-lg shadow-blue-200 text-xl"
-          >
-            <CheckCircle2 size={28} />
-            Xác nhận nhập kho Hàn
-          </button>
+          {availablePos.length === 0 ? (
+            <div className="w-full bg-red-50 border-2 border-red-200 p-6 rounded-xl flex flex-col items-center gap-3 text-center">
+              <AlertCircle size={32} className="text-red-600" />
+              <div>
+                <p className="font-bold text-red-800 uppercase">Yêu cầu Lệnh sản xuất (PO)</p>
+                <p className="text-xs text-red-600">Bạn phải chọn PO cụ thể để ghi nhận sản xuất cho công đoạn Hàn.</p>
+              </div>
+            </div>
+          ) : (
+            <button 
+              type="submit"
+              disabled={!selectedPoId}
+              className={cn(
+                "w-full py-6 rounded-xl font-bold uppercase tracking-widest flex items-center justify-center gap-4 active:scale-[0.98] transition-all shadow-lg text-xl",
+                !selectedPoId 
+                  ? "bg-gray-300 text-gray-500 cursor-not-allowed" 
+                  : "bg-blue-600 text-white hover:bg-blue-700 shadow-blue-200"
+              )}
+            >
+              <CheckCircle2 size={28} />
+              Xác nhận nhập kho Hàn
+            </button>
+          )}
         </form>
       </div>
 
@@ -2514,12 +3786,23 @@ function WeldingInboundView({ parts, onManualInbound }: any) {
                 </div>
               )}
 
-              <button 
-                onClick={() => setLastScanned(null)}
-                className="w-full py-4 text-sm font-bold uppercase tracking-widest text-gray-400 hover:text-[#141414] transition-colors"
-              >
-                Đóng thông báo
-              </button>
+              <div className="flex gap-4 w-full">
+                <button 
+                  onClick={() => setLastScanned(null)}
+                  className="flex-1 py-4 text-sm font-bold uppercase tracking-widest text-gray-400 hover:text-[#141414] transition-colors border-2 border-gray-100 rounded-xl"
+                >
+                  Đóng
+                </button>
+                {lastScanned.status === 'success' && (
+                  <button 
+                    onClick={() => setDefectModal({ partId: lastScanned.partId, stageId: 'WELDING' })}
+                    className="flex-1 py-4 text-sm font-bold uppercase tracking-widest text-red-600 hover:bg-red-50 transition-colors border-2 border-red-100 rounded-xl flex items-center justify-center gap-2"
+                  >
+                    <AlertCircle size={18} />
+                    Báo lỗi (NG)
+                  </button>
+                )}
+              </div>
             </motion.div>
           ) : (
             <div className="bg-gray-100 rounded-3xl border-2 border-dashed border-gray-300 h-full flex flex-col items-center justify-center p-12 text-center text-gray-400">
@@ -2533,7 +3816,7 @@ function WeldingInboundView({ parts, onManualInbound }: any) {
   );
 }
 
-function LaserInboundView({ parts, onManualInbound }: any) {
+function LaserInboundView({ parts, onManualInbound, setDefectModal, productionOrders }: any) {
   const [targetLocation, setTargetLocation] = useState<'IN' | 'OUT'>('IN');
   const [manualPart, setManualPart] = useState('');
   const [manualQty, setManualQty] = useState(0);
@@ -2542,35 +3825,51 @@ function LaserInboundView({ parts, onManualInbound }: any) {
 
   const selectedStage = 'LASER';
 
-  useEffect(() => {
-    if (parts.length > 0 && !manualPart) {
-      const laserParts = parts.filter((p: any) => targetLocation === 'IN' ? p.level === 3 : p.level === 2);
-      if (laserParts.length > 0) setManualPart(laserParts[0].id);
-    }
-  }, [parts, targetLocation]);
+  const allAvailablePos = useMemo(() => {
+    return (productionOrders || []).filter(
+      (p: any) => p.stageId === selectedStage && p.status !== 'COMPLETED'
+    );
+  }, [selectedStage, productionOrders]);
 
   const filteredParts = parts.filter((p: any) => {
+    if (selectedPoId && targetLocation === 'OUT') {
+      const selectedPo = allAvailablePos.find(po => po.id === selectedPoId);
+      if (selectedPo && p.id !== selectedPo.partId) return false;
+    } else if (targetLocation === 'OUT') {
+      const hasAvailablePo = allAvailablePos.some(po => po.partId === p.id);
+      if (!hasAvailablePo) return false;
+    }
+    
     if (targetLocation === 'IN') return p.level === 3;
     return p.level === 2;
   });
 
+  const availablePos = allAvailablePos.filter(p => p.partId === manualPart);
+
+  const handlePartChange = (partId: string) => {
+    setManualPart(partId);
+    const pos = allAvailablePos.filter(p => p.partId === partId);
+    setSelectedPoId(pos.length > 0 ? pos[0].id : "");
+  };
+
+  const handlePoChange = (poId: string) => {
+    setSelectedPoId(poId);
+    if (poId && targetLocation === 'OUT') {
+      const po = allAvailablePos.find(p => p.id === poId);
+      if (po && po.partId !== manualPart) {
+        setManualPart(po.partId);
+      }
+    }
+  };
+
   useEffect(() => {
     if (filteredParts.length > 0 && !filteredParts.find((p: any) => p.id === manualPart)) {
-      setManualPart(filteredParts[0].id);
+      const firstPartId = filteredParts[0].id;
+      setManualPart(firstPartId);
+      const pos = allAvailablePos.filter(p => p.partId === firstPartId);
+      setSelectedPoId(pos.length > 0 ? pos[0].id : "");
     }
-  }, [filteredParts, manualPart]);
-
-  const availablePos = storageService.getProductionOrders().filter(
-    p => p.partId === manualPart && p.stageId === selectedStage && p.status !== 'COMPLETED'
-  );
-
-  useEffect(() => {
-    if (availablePos.length > 0) {
-      setSelectedPoId(availablePos[0].id);
-    } else {
-      setSelectedPoId("");
-    }
-  }, [manualPart, availablePos.length]);
+  }, [filteredParts, manualPart, allAvailablePos]);
 
   const handleManualSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -2654,6 +3953,21 @@ function LaserInboundView({ parts, onManualInbound }: any) {
             </div>
           </div>
 
+          {targetLocation === 'OUT' && allAvailablePos.length > 0 && (
+            <div className="space-y-4">
+              <label className="text-sm font-bold uppercase tracking-widest opacity-50">Chọn Lệnh PO (Tiến độ)</label>
+              <SearchableSelect 
+                options={allAvailablePos.map(po => ({
+                  id: po.id,
+                  label: `${po.id.startsWith('REPAIR') ? '🛠️ [BÙ] ' : ''}${po.id} - ${getProcessValue(parts.find((p: any) => p.id === po.partId)?.name || po.partId, parts.find((p: any) => p.id === po.partId), selectedStage, targetLocation)} (${po.producedQuantity}/${po.targetQuantity})`
+                }))}
+                value={selectedPoId}
+                onChange={handlePoChange}
+                placeholder="Tìm Lệnh PO..."
+              />
+            </div>
+          )}
+
           <div className="space-y-4">
             <label className="text-sm font-bold uppercase tracking-widest opacity-50">Chọn {targetLocation === 'IN' ? 'mã tôn' : 'mã linh kiện'}:</label>
             <SearchableSelect 
@@ -2662,27 +3976,10 @@ function LaserInboundView({ parts, onManualInbound }: any) {
                 label: `${getProcessValue(p.id, p, selectedStage, targetLocation)} - ${getProcessValue(p.name, p, selectedStage, targetLocation)}` 
               }))}
               value={manualPart}
-              onChange={setManualPart}
+              onChange={handlePartChange}
               placeholder="Tìm kiếm..."
             />
           </div>
-
-          {targetLocation === 'OUT' && availablePos.length > 0 && (
-            <div className="space-y-4">
-              <label className="text-sm font-bold uppercase tracking-widest opacity-50">Chọn Lệnh PO (Tiến độ)</label>
-              <select 
-                value={selectedPoId}
-                onChange={(e) => setSelectedPoId(e.target.value)}
-                className="w-full p-5 rounded-xl border-2 border-gray-100 font-bold text-lg focus:border-blue-600 outline-none bg-white cursor-pointer"
-              >
-                {availablePos.map(po => (
-                  <option key={po.id} value={po.id}>
-                    {po.id} ({po.producedQuantity}/{po.targetQuantity})
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
 
           <div className="space-y-4">
             <div className="flex justify-between items-center">
@@ -2703,13 +4000,29 @@ function LaserInboundView({ parts, onManualInbound }: any) {
             />
           </div>
 
-          <button 
-            type="submit"
-            className="w-full bg-blue-600 text-white py-6 rounded-xl font-bold uppercase tracking-widest flex items-center justify-center gap-4 hover:bg-blue-700 transition-all shadow-lg shadow-blue-200 text-xl"
-          >
-            <CheckCircle2 size={28} />
-            Xác nhận nhập kho Laser
-          </button>
+          {availablePos.length === 0 && targetLocation === 'OUT' ? (
+            <div className="w-full bg-red-50 border-2 border-red-200 p-6 rounded-xl flex flex-col items-center gap-3 text-center">
+              <AlertCircle size={32} className="text-red-600" />
+              <div>
+                <p className="font-bold text-red-800 uppercase">Yêu cầu Lệnh sản xuất (PO)</p>
+                <p className="text-xs text-red-600">Linh kiện cắt Laser (OUT) phải gắn với một PO đang chạy.</p>
+              </div>
+            </div>
+          ) : (
+            <button 
+              type="submit"
+              disabled={targetLocation === 'OUT' && !selectedPoId}
+              className={cn(
+                "w-full py-6 rounded-xl font-bold uppercase tracking-widest flex items-center justify-center gap-4 active:scale-[0.98] transition-all shadow-lg text-xl",
+                (targetLocation === 'OUT' && !selectedPoId)
+                  ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                  : "bg-blue-600 text-white hover:bg-blue-700 shadow-blue-200"
+              )}
+            >
+              <CheckCircle2 size={28} />
+              Xác nhận nhập kho Laser
+            </button>
+          )}
         </form>
       </div>
 
@@ -2778,12 +4091,23 @@ function LaserInboundView({ parts, onManualInbound }: any) {
                 </div>
               )}
 
-              <button 
-                onClick={() => setLastScanned(null)}
-                className="w-full py-4 text-sm font-bold uppercase tracking-widest text-gray-400 hover:text-[#141414] transition-colors"
-              >
-                Đóng thông báo
-              </button>
+              <div className="flex gap-4 w-full">
+                <button 
+                  onClick={() => setLastScanned(null)}
+                  className="flex-1 py-4 text-sm font-bold uppercase tracking-widest text-gray-400 hover:text-[#141414] transition-colors border-2 border-gray-100 rounded-xl"
+                >
+                  Đóng
+                </button>
+                {lastScanned.status === 'success' && (
+                  <button 
+                    onClick={() => setDefectModal({ partId: lastScanned.partId, stageId: selectedStage, poId: lastScanned.poId })}
+                    className="flex-1 py-4 text-sm font-bold uppercase tracking-widest text-red-600 hover:bg-red-50 transition-colors border-2 border-red-100 rounded-xl flex items-center justify-center gap-2"
+                  >
+                    <AlertCircle size={18} />
+                    Báo lỗi (NG)
+                  </button>
+                )}
+              </div>
             </motion.div>
           ) : (
             <div className="bg-gray-100 rounded-3xl border-2 border-dashed border-gray-300 h-full flex flex-col items-center justify-center p-12 text-center text-gray-400">
@@ -2797,7 +4121,7 @@ function LaserInboundView({ parts, onManualInbound }: any) {
   );
 }
 
-function ManualInboundView({ parts, onManualInbound }: any) {
+function ManualInboundView({ parts, onManualInbound, setDefectModal, productionOrders }: any) {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [password, setPassword] = useState('');
   const [selectedStage, setSelectedStage] = useState<StageId>(STAGES[0].id);
@@ -2822,8 +4146,21 @@ function ManualInboundView({ parts, onManualInbound }: any) {
     }
   };
 
+  const allAvailablePos = useMemo(() => {
+    return (productionOrders || []).filter(
+      (p: any) => p.stageId === selectedStage && p.status !== 'COMPLETED'
+    );
+  }, [selectedStage, productionOrders]);
+
   const filteredParts = parts.filter((p: any) => {
+    // Allow selecting any valid part for IN/OUT even if no PO exists in manual inbound
+    if (selectedPoId && targetLocation === 'OUT') {
+      const selectedPo = allAvailablePos.find(po => po.id === selectedPoId);
+      if (selectedPo && p.id !== selectedPo.partId) return false;
+    }
+
     if (selectedStage === 'LASER') {
+      if (p.skipLaser) return false;
       if (targetLocation === 'IN') return p.level === 3;
       if (targetLocation === 'OUT') return p.level === 2;
     }
@@ -2835,27 +4172,36 @@ function ManualInboundView({ parts, onManualInbound }: any) {
       if (targetLocation === 'IN') return p.level === 2;
       if (targetLocation === 'OUT') return p.level === 1;
     }
-    if (selectedStage === 'PAINTING') return p.level === 1;
+    if (selectedStage === 'PAINTING') return p.level === 1 && !p.skipPainting;
     return true;
   });
 
+  const availablePos = allAvailablePos.filter(p => p.partId === manualPart);
+
+  const handlePartChange = (partId: string) => {
+    setManualPart(partId);
+    const pos = allAvailablePos.filter(p => p.partId === partId);
+    setSelectedPoId(pos.length > 0 ? pos[0].id : "");
+  };
+
+  const handlePoChange = (poId: string) => {
+    setSelectedPoId(poId);
+    if (poId && targetLocation === 'OUT') {
+      const po = allAvailablePos.find(p => p.id === poId);
+      if (po && po.partId !== manualPart) {
+        setManualPart(po.partId);
+      }
+    }
+  };
+
   useEffect(() => {
     if (filteredParts.length > 0 && !filteredParts.find((p: any) => p.id === manualPart)) {
-      setManualPart(filteredParts[0].id);
+      const firstPartId = filteredParts[0].id;
+      setManualPart(firstPartId);
+      const pos = allAvailablePos.filter(p => p.partId === firstPartId);
+      setSelectedPoId(pos.length > 0 ? pos[0].id : "");
     }
-  }, [selectedStage, filteredParts, manualPart]);
-
-  const availablePos = storageService.getProductionOrders().filter(
-    p => p.partId === manualPart && p.stageId === selectedStage && p.status !== 'COMPLETED'
-  );
-
-  useEffect(() => {
-    if (availablePos.length > 0) {
-      setSelectedPoId(availablePos[0].id);
-    } else {
-      setSelectedPoId("");
-    }
-  }, [manualPart, selectedStage, availablePos.length]);
+  }, [selectedStage, filteredParts, manualPart, allAvailablePos]);
 
   const handleManualSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -2979,6 +4325,21 @@ function ManualInboundView({ parts, onManualInbound }: any) {
             </div>
           </div>
 
+          {allAvailablePos.length > 0 && (
+            <div className="space-y-4">
+              <label className="text-sm font-bold uppercase tracking-widest opacity-50">Chọn Lệnh PO (Tiến độ)</label>
+              <SearchableSelect 
+                options={allAvailablePos.map(po => ({
+                  id: po.id,
+                  label: `${po.id.startsWith('REPAIR') ? '🛠️ [BÙ] ' : ''}${po.id} - ${getProcessValue(parts.find((p: any) => p.id === po.partId)?.name || po.partId, parts.find((p: any) => p.id === po.partId), selectedStage, targetLocation)} (${po.producedQuantity}/${po.targetQuantity})`
+                }))}
+                value={selectedPoId}
+                onChange={handlePoChange}
+                placeholder="Tìm Lệnh PO..."
+              />
+            </div>
+          )}
+
           <div className="space-y-4">
             <label className="text-sm font-bold uppercase tracking-widest opacity-50">Chọn linh kiện:</label>
             <SearchableSelect 
@@ -2987,27 +4348,10 @@ function ManualInboundView({ parts, onManualInbound }: any) {
                 label: `${getProcessValue(p.id, p, selectedStage, targetLocation)} - ${getProcessValue(p.name, p, selectedStage, targetLocation)}` 
               }))}
               value={manualPart}
-              onChange={setManualPart}
+              onChange={handlePartChange}
               placeholder="Tìm mã linh kiện..."
             />
           </div>
-
-          {availablePos.length > 0 && (
-            <div className="space-y-4">
-              <label className="text-sm font-bold uppercase tracking-widest opacity-50">Chọn Lệnh PO (Tiến độ)</label>
-              <select 
-                value={selectedPoId}
-                onChange={(e) => setSelectedPoId(e.target.value)}
-                className="w-full p-5 rounded-xl border-2 border-gray-100 font-bold text-lg focus:border-blue-600 outline-none bg-white cursor-pointer"
-              >
-                {availablePos.map(po => (
-                  <option key={po.id} value={po.id}>
-                    {po.id} ({po.producedQuantity}/{po.targetQuantity})
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
 
           <div className="space-y-4">
             <div className="flex justify-between items-center">
@@ -3028,13 +4372,29 @@ function ManualInboundView({ parts, onManualInbound }: any) {
             />
           </div>
 
-          <button 
-            type="submit"
-            className="w-full bg-blue-600 text-white py-6 rounded-xl font-bold uppercase tracking-widest flex items-center justify-center gap-4 hover:bg-blue-700 transition-all shadow-lg shadow-blue-200 text-xl"
-          >
-            <CheckCircle2 size={28} />
-            Xác nhận nhập kho thủ công
-          </button>
+          {availablePos.length === 0 && !(selectedStage === 'LASER' && targetLocation === 'IN') ? (
+            <div className="w-full bg-red-50 border-2 border-red-200 p-6 rounded-xl flex flex-col items-center gap-3 text-center">
+              <AlertCircle size={32} className="text-red-600" />
+              <div>
+                <p className="font-bold text-red-800 uppercase">Yêu cầu Lệnh sản xuất (PO)</p>
+                <p className="text-xs text-red-600">Bạn phải có PO con tương ứng mới được phép nhập/xuất tại công đoạn này.</p>
+              </div>
+            </div>
+          ) : (
+            <button 
+              type="submit"
+              disabled={!(selectedStage === 'LASER' && targetLocation === 'IN') && !selectedPoId}
+              className={cn(
+                "w-full py-6 rounded-xl font-bold uppercase tracking-widest flex items-center justify-center gap-4 active:scale-[0.98] transition-all shadow-lg text-xl",
+                (!(selectedStage === 'LASER' && targetLocation === 'IN') && !selectedPoId)
+                  ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                  : "bg-blue-600 text-white hover:bg-blue-700 shadow-blue-200"
+              )}
+            >
+              <CheckCircle2 size={28} />
+              Xác nhận nhập kho thủ công
+            </button>
+          )}
         </form>
       </div>
 
@@ -3103,12 +4463,23 @@ function ManualInboundView({ parts, onManualInbound }: any) {
                 </div>
               )}
 
-              <button 
-                onClick={() => setLastScanned(null)}
-                className="w-full py-4 text-sm font-bold uppercase tracking-widest text-gray-400 hover:text-[#141414] transition-colors"
-              >
-                Đóng thông báo
-              </button>
+              <div className="flex gap-4 w-full">
+                <button 
+                  onClick={() => setLastScanned(null)}
+                  className="flex-1 py-4 text-sm font-bold uppercase tracking-widest text-gray-400 hover:text-[#141414] transition-colors border-2 border-gray-100 rounded-xl"
+                >
+                  Đóng
+                </button>
+                {lastScanned.status === 'success' && (
+                  <button 
+                    onClick={() => setDefectModal({ partId: lastScanned.partId, stageId: selectedStage, poId: lastScanned.poId })}
+                    className="flex-1 py-4 text-sm font-bold uppercase tracking-widest text-red-600 hover:bg-red-50 transition-colors border-2 border-red-100 rounded-xl flex items-center justify-center gap-2"
+                  >
+                    <AlertCircle size={18} />
+                    Báo lỗi (NG)
+                  </button>
+                )}
+              </div>
             </motion.div>
           ) : (
             <div className="bg-gray-100 rounded-3xl border-2 border-dashed border-gray-300 h-full flex flex-col items-center justify-center p-12 text-center text-gray-400">
@@ -3122,7 +4493,1385 @@ function ManualInboundView({ parts, onManualInbound }: any) {
   );
 }
 
-function InboundView({ selectedStage, setSelectedStage, onScanSuccess, parts }: any) {
+function GlazingComponentPrintCard({ norm, plan, idx, onPrint, onUpdateProgress }: any) {
+  const printed = (plan.producedQuantities || {})[norm.id] || 0;
+  const total = plan.targetQuantity;
+  const remaining = total - printed;
+  const [printQty, setPrintQty] = useState(remaining > 0 ? remaining : 1);
+  const progress = Math.min(100, (printed / total) * 100);
+
+  return (
+    <div key={`${norm.id}-${idx}`} className="bg-white p-6 rounded-3xl shadow-xl border border-gray-100 flex flex-col gap-6 group hover:shadow-2xl transition-all">
+      <div className="flex justify-between items-start">
+        <div className="space-y-1">
+          <span className="text-[10px] font-black text-blue-500 uppercase tracking-widest">{norm.id}</span>
+          <h5 className="font-black text-gray-900 leading-tight text-lg">{norm.partName}</h5>
+        </div>
+        <div className="bg-blue-50 px-3 py-1 rounded-full text-[10px] font-black text-blue-600 uppercase">
+          Norm: {norm.norm}
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex justify-between text-xs font-black uppercase">
+          <span className="text-gray-400">Tiến độ in label:</span>
+          <span className={cn(progress >= 100 ? "text-green-600" : "text-blue-600")}>
+            {printed.toLocaleString()} / {total.toLocaleString()}
+          </span>
+        </div>
+        <div className="h-3 bg-gray-100 rounded-full overflow-hidden p-0.5 border border-gray-50">
+          <motion.div 
+            initial={{ width: 0 }}
+            animate={{ width: `${progress}%` }}
+            className={cn(
+              "h-full rounded-full shadow-inner",
+              progress >= 100 ? "bg-green-500" : "bg-blue-500"
+            )}
+          />
+        </div>
+      </div>
+
+      <div className="flex items-center gap-4 bg-gray-50 p-4 rounded-2xl border border-gray-100">
+        <div className="flex-1">
+          <span className="text-[10px] font-black text-gray-400 uppercase block mb-1">Số lượng in</span>
+          <input 
+            type="number"
+            min="1"
+            max={remaining}
+            value={printQty}
+            onChange={(e) => setPrintQty(parseInt(e.target.value) || 0)}
+            className="w-full bg-white border border-gray-200 rounded-xl px-4 py-2 font-black text-blue-700 focus:ring-4 focus:ring-blue-100 outline-none transition-all"
+          />
+        </div>
+        <button 
+          disabled={printed >= total || printQty <= 0}
+          onClick={() => {
+            onPrint({
+              id: `GLZ-${Date.now()}-${norm.id}`,
+              partId: norm.id,
+              partName: norm.partName,
+              quantity: printQty,
+              type: 'STAGE_OUT',
+              stageId: 'GLAZING',
+              targetStageId: 'DCLR',
+              timestamp: Date.now(),
+              qrData: norm.id,
+              planId: plan.id
+            });
+            onUpdateProgress(printQty);
+          }}
+          className={cn(
+            "h-12 px-6 rounded-xl flex items-center justify-center gap-2 transition-all font-black uppercase text-xs tracking-tight shadow-lg",
+            (printed >= total || printQty <= 0)
+              ? "bg-gray-200 text-gray-400 cursor-not-allowed"
+              : "bg-blue-600 text-white hover:bg-blue-700 hover:scale-105 active:scale-95 shadow-blue-200"
+          )}
+        >
+          <Printer size={16} />
+          IN {printQty} NHÃN
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function GlazingView({ parts, inventory: globalInventory, onManualInbound, setDefectModal, refreshData, labels, onPrint }: any) {
+  const inventory = globalInventory || [];
+  const [activeTab, setActiveTab] = useState<'INVENTORY' | 'INBOUND' | 'OUTBOUND' | 'QUICK_PRINT' | 'PLANNING' | 'CONFIG'>('INVENTORY');
+  const [configs, setConfigs] = useState<import('./types').GlazingConfig[]>([]);
+  const [outConfigs, setOutConfigs] = useState<import('./types').GlazingOutConfig[]>([]);
+  const [quickPrintParts, setQuickPrintParts] = useState<{id: string, name: string, quantity: number}[]>(() => storageService.getQuickPrintParts());
+  
+  // Planning state
+  const [selectedModel, setSelectedModel] = useState("");
+  const [planQuantity, setPlanQuantity] = useState(0);
+  const [targetCompletion, setTargetCompletion] = useState(format(new Date(), "yyyy-MM-dd'T'HH:mm"));
+  const [glazingPlans, setGlazingPlans] = useState<import('./types').GlazingPlan[]>(() => storageService.getGlazingPlans());
+  const [glazingPlanNorms, setGlazingPlanNorms] = useState<import('./types').GlazingPlanNorm[]>(() => storageService.getGlazingPlanNorms());
+  const [planSubTab, setPlanSubTab] = useState<'IN_PROGRESS' | 'COMPLETED'>('IN_PROGRESS');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedPlanIdForPrint, setSelectedPlanIdForPrint] = useState<string | "">("");
+  const [estimatedGlazingStart, setEstimatedGlazingStart] = useState<number | null>(null);
+  const [estimatedGlazingEnd, setEstimatedGlazingEnd] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (selectedModel && planQuantity > 0 && targetCompletion) {
+      const endTs = new Date(targetCompletion).getTime();
+      const schedule = storageService.getGlazingSchedule(selectedModel, planQuantity, endTs);
+      setEstimatedGlazingStart(schedule.start);
+      setEstimatedGlazingEnd(schedule.end);
+    } else {
+      setEstimatedGlazingStart(null);
+      setEstimatedGlazingEnd(null);
+    }
+  }, [selectedModel, planQuantity, targetCompletion, glazingPlanNorms]);
+
+  const pendingGlazingLabels = useMemo(() => {
+    return (labels || []).filter((l: any) => l.stageId === 'GLAZING' && l.type === 'STAGE_OUT' && l.printed === false);
+  }, [labels]);
+  
+  useEffect(() => {
+    const loadedConfigs = storageService.getGlazingConfigs();
+    const loadedOutConfigs = storageService.getGlazingOutConfigs();
+    
+    // Auto deduplicate any legacy duplicates in localStorage
+    const uniqueConfigs: import('./types').GlazingConfig[] = [];
+    const seen = new Set<string>();
+    loadedConfigs.forEach(c => {
+      if (!seen.has(c.partId)) {
+        seen.add(c.partId);
+        uniqueConfigs.push(c);
+      }
+    });
+
+    if (uniqueConfigs.length !== loadedConfigs.length) {
+      storageService.saveGlazingConfigs(uniqueConfigs);
+    }
+
+    setConfigs(uniqueConfigs);
+    setOutConfigs(loadedOutConfigs.filter(c => !c.finalPartName.toUpperCase().includes('DCLR')));
+  }, []);
+
+  useEffect(() => {
+    storageService.saveQuickPrintParts(quickPrintParts);
+  }, [quickPrintParts]);
+
+  const handleGlazingExport = (item: import('./types').InventoryItem) => {
+    const qtyInput = glazingOutQty[item.partId];
+    const qty = parseFloat(qtyInput);
+    
+    if (!qty || qty <= 0) return alert('Vui lòng nhập số lượng xuất');
+    if (qty > item.quantity) return alert('Số lượng xuất vượt quá tồn kho');
+
+    try {
+      // 1. Record Stage Out (From GLAZING OUT to DCLR)
+      const tx = storageService.recordStageOut(item.partId, 'GLAZING', qty, 'OUT', 'DCLR');
+      
+      // 2. Clear input
+      setGlazingOutQty(prev => ({ ...prev, [item.partId]: '' }));
+      
+      // 3. Refresh
+      refreshData();
+      
+      // 4. Trigger print modal immediately
+      const isPseudo = item.partId.startsWith('GLZ-OUT-');
+      const displayName = isPseudo ? item.partId.replace('GLZ-OUT-', '') : (parts.find((p: any) => p.id === item.partId)?.name || item.partId);
+      onPrint({ ...tx, partName: displayName });
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Lỗi xuất kho');
+    }
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const bstr = evt.target?.result;
+        const wb = XLSX.read(bstr, { type: 'binary' });
+        const wsname = wb.SheetNames[0];
+        const ws = wb.Sheets[wsname];
+        const data = XLSX.utils.sheet_to_json(ws, { header: 1 }) as any[][];
+        
+        if (data.length < 2) return alert('File Excel không có dữ liệu');
+
+        const headers = data[0].map(h => String(h).toLowerCase().trim());
+        const nameIdx = headers.findIndex(h => h.includes('tên'));
+        const codeIdx = headers.findIndex(h => h.includes('mã'));
+        const sourceIdx = headers.findIndex(h => h.includes('công đoạn tiếp nhận') || h.includes('từ kho'));
+
+        if (nameIdx === -1 || codeIdx === -1 || sourceIdx === -1) {
+          return alert('Không tìm thấy cột Tên, Mã, hoặc Nguồn trong file Excel.');
+        }
+
+        const newConfigs: import('./types').GlazingConfig[] = [];
+        const seenPartIds = new Set<string>();
+
+        for (let i = 1; i < data.length; i++) {
+          const row = data[i];
+          if (!row[codeIdx]) continue;
+          
+          const partIdStr = String(row[codeIdx]).trim();
+          if (!partIdStr || seenPartIds.has(partIdStr)) continue;
+          seenPartIds.add(partIdStr);
+
+          let sourceStr = String(row[sourceIdx] || '').toUpperCase();
+          let sId: StageId = 'BENDING';
+          if (sourceStr.includes('CHẤN') || sourceStr.includes('DẬP')) sId = 'BENDING';
+          else if (sourceStr.includes('SƠN') || sourceStr.includes('PAINT')) sId = 'PAINTING';
+          else if (sourceStr.includes('LASER')) sId = 'LASER';
+          else if (sourceStr.includes('HÀN')) sId = 'WELDING';
+
+          newConfigs.push({
+            partName: String(row[nameIdx]).trim(),
+            partId: partIdStr,
+            sourceStageId: sId
+          });
+        }
+
+        storageService.saveGlazingConfigs(newConfigs);
+        setConfigs(newConfigs);
+        alert(`Đã nạp ${newConfigs.length} cấu hình Dán Kính.`);
+      } catch (err) {
+        alert('Lỗi đọc file: ' + err);
+      }
+    };
+    reader.readAsBinaryString(file);
+  };
+
+  const handleOutFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const bstr = evt.target?.result;
+        const wb = XLSX.read(bstr, { type: 'binary' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const data = XLSX.utils.sheet_to_json(ws, { header: 1 }) as any[][];
+        if (data.length < 2) return alert('File Excel không có dữ liệu');
+
+        const headers = data[0].map(h => String(h).toLowerCase().trim());
+        const finalNameIdx = headers.findIndex(h => h.includes('thành phẩm') && !h.includes('con'));
+        const subNameIdx = headers.findIndex(h => h.includes('tên') && h.includes('con'));
+        const subCodeIdx = headers.findIndex(h => h.includes('mã') && h.includes('con'));
+
+        if (finalNameIdx === -1 || subNameIdx === -1 || subCodeIdx === -1) {
+          return alert('Không tìm thấy cột Tên thành phẩm, Tên thành phẩm con hoặc Mã thành phẩm con.');
+        }
+
+        const outConfigMap = new Map<string, { partId: string, partName: string }[]>();
+
+        for (let i = 1; i < data.length; i++) {
+          const row = data[i];
+          const finalName = String(row[finalNameIdx] || '').trim();
+          const subName = String(row[subNameIdx] || '').trim();
+          const subCode = String(row[subCodeIdx] || '').trim();
+
+          if (!finalName || !subCode) continue;
+
+          const existingList = outConfigMap.get(finalName) || [];
+          existingList.push({ partId: subCode, partName: subName });
+          outConfigMap.set(finalName, existingList);
+        }
+
+        const newOutConfigs: import('./types').GlazingOutConfig[] = [];
+        outConfigMap.forEach((subParts, finalPartName) => {
+          // Hide DCLR specific final part names as per request
+          if (!finalPartName.toUpperCase().includes('DCLR')) {
+            newOutConfigs.push({ finalPartName, subParts });
+          }
+        });
+
+        storageService.saveGlazingOutConfigs(newOutConfigs);
+        setOutConfigs(newOutConfigs);
+        alert(`Đã nạp ${newOutConfigs.length} cấu hình gói Dán Kính OUT.`);
+      } catch (err) {
+        alert('Lỗi đọc file OUT: ' + err);
+      }
+    };
+    reader.readAsBinaryString(file);
+  };
+
+  const [inboundQty, setInboundQty] = useState<Record<string, string>>({});
+  const [glazingOutQty, setGlazingOutQty] = useState<Record<string, string>>({});
+
+  const handleReceive = (config: import('./types').GlazingConfig) => {
+    const qty = parseFloat(inboundQty[config.partId]);
+    if (!qty || qty <= 0) return alert('Vui lòng nhập số lượng hợp lệ');
+    
+    const sourceInv = globalInventory.find((i: any) => i.partId.toUpperCase() === config.partId.toUpperCase() && i.stageId === config.sourceStageId && i.location === 'OUT');
+    if (!sourceInv || sourceInv.quantity < qty) {
+      return alert(`Không đủ tồn kho OUT tại ${STAGES.find(s => s.id === config.sourceStageId)?.name || config.sourceStageId}. Kho hiện có: ${sourceInv?.quantity || 0}`);
+    }
+
+    try {
+      storageService.recordStageOut(config.partId, config.sourceStageId, qty, 'OUT', 'GLAZING');
+      storageService.recordManualInbound(config.partId, 'GLAZING', 'IN', qty);
+      setInboundQty({...inboundQty, [config.partId]: ''});
+      refreshData();
+      alert('Nhập kho thành công!');
+    } catch(err) {
+      alert(err instanceof Error ? err.message : 'Lỗi nhập kho');
+    }
+  };
+
+  const [outboundQty, setOutboundQty] = useState<Record<string, string>>({});
+  const handleTransferOut = (finalPartName: string) => {
+    const qty = parseFloat(outboundQty[finalPartName]);
+    if (!qty || qty <= 0) return alert('Vui lòng nhập số lượng hợp lệ');
+    
+    const config = outConfigs.find(c => c.finalPartName === finalPartName);
+    if (!config) return alert('Không tìm thấy cấu hình cho ' + finalPartName);
+    
+    // Aggregate subparts in case there are duplicates in the config
+    const requiredQtys: Record<string, number> = {};
+    for (const sp of config.subParts) {
+      if (!requiredQtys[sp.partId]) requiredQtys[sp.partId] = 0;
+      requiredQtys[sp.partId] += 1;
+    }
+
+    // Validate all subparts have enough qty
+    for (const partId of Object.keys(requiredQtys)) {
+      const required = requiredQtys[partId] * qty;
+      const inv = globalInventory.find(i => i.partId.toUpperCase() === partId.toUpperCase() && i.location === 'IN' && i.stageId === 'GLAZING');
+      if (!inv || inv.quantity < required) {
+        return alert(`Không đủ tồn kho IN cho linh kiện mã ${partId}. Cần: ${required}, Có: ${inv?.quantity || 0}`);
+      }
+    }
+
+    try {
+      // Deduct subparts from IN
+      for (const partId of Object.keys(requiredQtys)) {
+        const required = requiredQtys[partId] * qty;
+        storageService.updateInventory(partId, 'GLAZING', 'IN', -required);
+      }
+
+      // We use finalPartName as the "partId" for the final compiled object in inventory OUT
+      const pseudoPartId = `GLZ-OUT-${finalPartName}`;
+      storageService.updateInventory(pseudoPartId, 'GLAZING', 'OUT', qty);
+      
+      setOutboundQty({...outboundQty, [finalPartName]: ''});
+      refreshData();
+      alert('Đóng gói & Chuyển sang OUT thành công!');
+    } catch(err) {
+      alert('Lỗi xuất kho: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  };
+
+  const handleQuickPrintImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const dataBuffer = await file.arrayBuffer();
+      const workbook = XLSX.read(dataBuffer);
+      const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json<any[]>(firstSheet, { header: 1 });
+
+      if (rows.length < 2) {
+        alert('File Excel không có dữ liệu');
+        return;
+      }
+
+      const headers = rows[0].map((h: any) => String(h || '').toLowerCase().trim());
+      const nameIdx = headers.findIndex((h: any) => h.includes('tên'));
+      const idIdx = headers.findIndex((h: any) => h.includes('mã'));
+
+      if (nameIdx === -1 || idIdx === -1) {
+        alert('Không tìm thấy cột "Tên linh kiện" hoặc "Mã linh kiện" trong file Excel.');
+        return;
+      }
+
+      const imported = rows.slice(1).map(row => ({
+        id: String(row[idIdx] || '').trim(),
+        name: String(row[nameIdx] || '').trim(),
+        quantity: 1
+      })).filter(p => p.id && p.name);
+
+      // Lọc trùng mã (ID)
+      const uniqueMap = new Map();
+      imported.forEach(item => {
+        if (!uniqueMap.has(item.id)) {
+          uniqueMap.set(item.id, item);
+        }
+      });
+
+      setQuickPrintParts(Array.from(uniqueMap.values()));
+    } catch (err) {
+      alert('Lỗi đọc file: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  };
+
+  const handleGlazingPlanImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const dataBuffer = await file.arrayBuffer();
+      const workbook = XLSX.read(dataBuffer);
+      const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json<any[]>(firstSheet, { header: 1 });
+
+      if (rows.length < 2) {
+        alert('File Excel không có dữ liệu');
+        return;
+      }
+
+      const headers = rows[0].map((h: any) => String(h || '').toLowerCase().trim());
+      const nameIdx = headers.findIndex((h: any) => h.includes('tên lk') || h.includes('tên linh kiện'));
+      const idIdx = headers.findIndex((h: any) => h.includes('mã lk') || h.includes('mã linh kiện') || h.includes('part id'));
+      const normIdx = headers.findIndex((h: any) => h.includes('định mức') || h.includes('đm'));
+      const modelIdx = headers.findIndex((h: any) => h.includes('tên model') || h.includes('mã model'));
+      const appliedIdx = headers.findIndex((h: any) => h.includes('model áp dụng') || h.includes('model sx') || h.includes('mã model'));
+
+      if (nameIdx === -1 || normIdx === -1) {
+        alert('Không tìm thấy các cột tối thiểu: Tên LK (hoặc Tên linh kiện), Định mức.');
+        return;
+      }
+
+      if (modelIdx === -1 && appliedIdx === -1) {
+        alert('Cần có ít nhất một trong các cột: Tên model hoặc Model áp dụng.');
+        return;
+      }
+
+      const imported: import('./types').GlazingPlanNorm[] = rows.slice(1).map((row, idx) => {
+        const partName = String(row[nameIdx] || '').trim();
+        const norm = parseFloat(String(row[normIdx]).replace(',', '.')) || 0;
+        
+        // Cần đảm bảo có modelName. Nếu thiếu modelIdx thì lấy appliedIdx
+        const modelVal = modelIdx > -1 ? String(row[modelIdx] || '').trim() : '';
+        const appliedVal = appliedIdx > -1 ? String(row[appliedIdx] || '').trim() : '';
+        
+        const modelName = modelVal || appliedVal;
+        const appliedModel = appliedVal || modelVal;
+        
+        let partId = '';
+        if (idIdx > -1 && row[idIdx]) {
+          partId = String(row[idIdx]).trim();
+        } else {
+          const foundPart = parts.find((p: any) => p.name.toLowerCase() === partName.toLowerCase());
+          if (foundPart) partId = foundPart.id;
+          else partId = `GLZ-PLAN-${idx}-${Date.now()}`;
+        }
+
+        return {
+          id: partId,
+          partName,
+          norm,
+          modelName,
+          appliedModel
+        };
+      }).filter(n => n.partName);
+
+      storageService.saveGlazingPlanNorms(imported);
+      setGlazingPlanNorms(imported);
+      alert(`Đã nhập thành công ${imported.length} định mức kế hoạch dán kính.`);
+    } catch (err) {
+      alert('Lỗi đọc file: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  };
+
+  const handleCreatePlan = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedModel || planQuantity <= 0) return;
+    
+    try {
+      const endTs = targetCompletion ? new Date(targetCompletion).getTime() : Date.now();
+      storageService.createGlazingPlan(selectedModel, planQuantity, endTs);
+      setGlazingPlans(storageService.getGlazingPlans());
+      setSelectedModel("");
+      setPlanQuantity(0);
+      refreshData();
+      alert('Đã lập kế hoạch dán kính thành công!');
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Lỗi khi tạo kế hoạch');
+    }
+  };
+
+  const currentGlazingPlans = useMemo(() => {
+    return glazingPlans.filter(p => p.status !== 'COMPLETED');
+  }, [glazingPlans]);
+
+  const completedGlazingPlans = useMemo(() => {
+    return glazingPlans.filter(p => p.status === 'COMPLETED');
+  }, [glazingPlans]);
+
+  const filteredQuickPrintParts = useMemo(() => {
+    if (!searchQuery.trim()) return quickPrintParts;
+    const q = searchQuery.toLowerCase().trim();
+    return quickPrintParts.filter(p => 
+      p.id.toLowerCase().includes(q) || 
+      p.name.toLowerCase().includes(q)
+    );
+  }, [quickPrintParts, searchQuery]);
+
+  return (
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
+      <div className="flex gap-4 border-b border-gray-200 overflow-x-auto scrollbar-hide">
+        {(['INVENTORY', 'PLANNING', 'INBOUND', 'QUICK_PRINT', 'OUTBOUND', 'CONFIG'] as const).map(tab => (
+          <button
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+            className={cn(
+              "px-6 py-4 font-bold text-sm uppercase tracking-widest border-b-4 transition-all duration-200 whitespace-nowrap",
+              activeTab === tab ? "border-blue-600 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-900 focus:outline-none"
+            )}
+          >
+            {tab === 'INVENTORY' ? 'Tồn kho IN' : tab === 'PLANNING' ? 'Kế hoạch sản xuất' : tab === 'INBOUND' ? 'Nhập IN' : tab === 'QUICK_PRINT' ? 'In Nhãn Nhanh' : tab === 'OUTBOUND' ? 'Đóng gói OUT' : 'Cấu hình'}
+          </button>
+        ))}
+      </div>
+
+      <div className="bg-white p-6 rounded-2xl shadow-xl border border-gray-100 min-h-[500px]">
+        {activeTab === 'PLANNING' && (
+          <div className="space-y-8">
+            <div className="bg-blue-50 p-6 rounded-3xl border border-blue-100">
+              <div className="flex items-center gap-3 mb-6">
+                <div className="bg-blue-600 p-2 rounded-lg">
+                  <ClipboardList className="text-white" size={24} />
+                </div>
+                <h3 className="text-xl font-black uppercase text-blue-900 tracking-tight">Lập Kế Hoạch Sản Xuất Dán Kính</h3>
+              </div>
+
+              <form onSubmit={handleCreatePlan} className="space-y-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 items-end">
+                  <div className="space-y-2">
+                    <label className="text-xs font-black uppercase text-blue-900/40 tracking-widest pl-1">Chọn Model</label>
+                    <SearchableSelect 
+                      options={Array.from(new Set(storageService.getModelBOM().map(b => b.modelId))).map(id => ({ 
+                        id, 
+                        label: parts.find((p: any) => p.id === id)?.name || id 
+                      }))}
+                      value={selectedModel}
+                      onChange={setSelectedModel}
+                      placeholder="Chọn model sản xuất..."
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-black uppercase text-blue-900/40 tracking-widest pl-1">Số lượng (Máy)</label>
+                    <input 
+                      type="number"
+                      value={planQuantity || ''}
+                      onChange={e => setPlanQuantity(parseFloat(e.target.value) || 0)}
+                      className="w-full p-4 rounded-xl border-2 border-blue-100 font-bold text-lg focus:border-blue-600 outline-none"
+                      placeholder="Nhập số lượng..."
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-black uppercase text-blue-900/40 tracking-widest pl-1">Ngày mong muốn hoàn thành</label>
+                    <input 
+                      type="datetime-local"
+                      value={targetCompletion}
+                      onChange={e => setTargetCompletion(e.target.value)}
+                      className="w-full p-4 rounded-xl border-2 border-blue-100 font-bold text-lg focus:border-blue-600 outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex flex-col md:flex-row justify-between items-center bg-white/50 p-4 rounded-2xl border border-blue-100 gap-4">
+                  <div className="flex items-center gap-4">
+                    <div className="bg-white px-5 py-3 rounded-xl border border-blue-100 flex items-center gap-6 shadow-sm">
+                      <div className="flex flex-col">
+                        <span className="text-[9px] font-black text-blue-900/50 uppercase tracking-widest leading-none mb-1.5 flex items-center gap-1">
+                          <Clock size={10} className="text-blue-400" /> Bắt đầu dự kiến
+                        </span>
+                        <span className="text-sm font-black text-blue-800">
+                          {estimatedGlazingStart ? format(new Date(estimatedGlazingStart), 'HH:mm - dd/MM/yyyy') : '--:--'}
+                        </span>
+                      </div>
+                      <div className="w-px h-8 bg-blue-100" />
+                      <div className="flex flex-col">
+                        <span className="text-[9px] font-black text-orange-900/50 uppercase tracking-widest leading-none mb-1.5 flex items-center gap-1">
+                          <CheckCircle2 size={10} className="text-orange-400" /> Dự kiến hoàn thành
+                        </span>
+                        <span className="text-sm font-black text-orange-600">
+                          {estimatedGlazingEnd ? format(new Date(estimatedGlazingEnd), 'HH:mm - dd/MM/yyyy') : '--:--'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <button 
+                    type="submit"
+                    disabled={!selectedModel || planQuantity <= 0}
+                    className="bg-blue-600 text-white px-10 py-4 rounded-xl font-black uppercase tracking-widest hover:bg-blue-700 transition-all shadow-lg shadow-blue-200 disabled:opacity-50"
+                  >
+                    Tạo Kế Hoạch
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            {selectedModel && (
+              <div className="bg-white rounded-2xl border border-blue-100 p-6 flex flex-col gap-4">
+                <div className="flex justify-between items-center">
+                  <h4 className="font-black text-gray-900 uppercase tracking-tight flex items-center gap-2">
+                    <div className="w-1.5 h-4 bg-blue-600 rounded-full" />
+                    Thành phần Model (Gói Cánh / Gói Đỉnh)
+                  </h4>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {glazingPlanNorms.filter(n => n.appliedModel === selectedModel).map((c, i) => (
+                    <div key={i} className="bg-blue-50/50 p-4 rounded-xl border border-blue-50 flex flex-col gap-1">
+                      <span className="text-[10px] font-black text-blue-400 uppercase tracking-widest">Linh kiện</span>
+                      <span className="font-bold text-gray-800">{c.partName}</span>
+                      <div className="flex border-t border-blue-100 mt-2 pt-2 gap-4">
+                        <div className="flex-1">
+                          <span className="text-[9px] font-bold text-gray-400 uppercase block">Số lượng:</span>
+                          <span className="text-base font-black text-blue-700">{planQuantity.toLocaleString()} Tấm</span>
+                        </div>
+                        <div className="flex-1">
+                          <span className="text-[9px] font-bold text-gray-400 uppercase block">Tổng thời gian:</span>
+                          <span className="text-base font-black text-orange-600">{(c.norm * planQuantity).toLocaleString()} s</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                  {glazingPlanNorms.filter(n => n.appliedModel === selectedModel).length === 0 && (
+                    <div className="col-span-full py-6 text-center text-gray-400 italic text-sm">
+                      Model này chưa được cài đặt định mức dán kính
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div className="space-y-4">
+              <div className="flex border-b border-gray-200 gap-6 px-4">
+                <button
+                  onClick={() => setPlanSubTab('IN_PROGRESS')}
+                  className={cn(
+                    "pb-3 text-sm font-black uppercase tracking-widest transition-all relative",
+                    planSubTab === 'IN_PROGRESS' ? "text-blue-600" : "text-gray-400 hover:text-gray-600"
+                  )}
+                >
+                  <div className="flex items-center gap-2">
+                    Kế hoạch đang thực hiện
+                    <span className="bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full text-[10px]">{currentGlazingPlans.length}</span>
+                  </div>
+                  {planSubTab === 'IN_PROGRESS' && (
+                    <div className="absolute bottom-0 left-0 right-0 h-1 bg-blue-600 rounded-t-full" />
+                  )}
+                </button>
+                <button
+                  onClick={() => setPlanSubTab('COMPLETED')}
+                  className={cn(
+                    "pb-3 text-sm font-black uppercase tracking-widest transition-all relative",
+                    planSubTab === 'COMPLETED' ? "text-green-600" : "text-gray-400 hover:text-gray-600"
+                  )}
+                >
+                  <div className="flex items-center gap-2">
+                    Đã hoàn thành
+                    <span className="bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full text-[10px]">{completedGlazingPlans.length}</span>
+                  </div>
+                  {planSubTab === 'COMPLETED' && (
+                    <div className="absolute bottom-0 left-0 right-0 h-1 bg-green-600 rounded-t-full" />
+                  )}
+                </button>
+              </div>
+
+              {planSubTab === 'IN_PROGRESS' && (
+                <>
+                  {currentGlazingPlans.length > 0 ? (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {currentGlazingPlans.map((plan) => {
+                        const modelName = parts.find((p: any) => p.id === plan.modelId)?.name || plan.modelId;
+                        const components = glazingPlanNorms.filter(n => n.appliedModel === plan.modelId);
+                        
+                        return (
+                          <div key={plan.id} className="bg-white border-2 border-gray-100 rounded-2xl p-5 hover:border-blue-200 transition-all group">
+                            <div className="flex justify-between items-start mb-4">
+                              <div>
+                                <div className="text-[10px] font-black text-blue-600 uppercase tracking-widest mb-1">{plan.id}</div>
+                                <h5 className="font-bold text-gray-900 leading-tight">{modelName}</h5>
+                              </div>
+                              <div className="px-3 py-1 rounded-full text-[10px] bg-blue-100 text-blue-700 font-black uppercase tracking-widest">
+                                {plan.targetQuantity} MÁY
+                              </div>
+                            </div>
+
+                            <div className="space-y-2 mb-4">
+                              <div className="text-[10px] font-black text-gray-400 uppercase tracking-widest pl-1">Thành phần & Tiến độ in</div>
+                              <div className="space-y-1">
+                                {components.map((c, i) => {
+                                  const printed = (plan.producedQuantities || {})[c.id] || 0;
+                                  const target = plan.targetQuantity;
+                                  const compProgress = Math.min(100, (printed / target) * 100);
+                                  
+                                  return (
+                                    <div key={i} className="flex flex-col bg-gray-50 px-3 py-2 rounded-lg gap-1.5">
+                                      <div className="flex justify-between items-center text-xs">
+                                        <span className="font-medium text-gray-600 truncate mr-2">{c.partName}</span>
+                                        <span className="font-black text-blue-700 whitespace-nowrap">{printed}/{target}</span>
+                                      </div>
+                                      <div className="h-1 bg-gray-200 rounded-full overflow-hidden">
+                                        <div 
+                                          className={cn("h-full transition-all duration-500", compProgress >= 100 ? "bg-green-500" : "bg-blue-500")}
+                                          style={{ width: `${compProgress}%` }}
+                                        />
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                                {components.length === 0 && (
+                                  <div className="text-[10px] text-gray-400 italic">Chưa cài đặt định mức cho model này</div>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="pt-3 border-t border-gray-100 flex flex-col gap-3">
+                              <div className="flex justify-between items-center">
+                                <div className="flex flex-col">
+                                  <span className="text-[9px] font-black text-gray-400 uppercase tracking-widest pl-1">Bắt đầu dự kiến</span>
+                                  <div className="flex items-center gap-2 bg-blue-50/50 px-2.5 py-1.5 rounded-lg border border-blue-50">
+                                    <span className="text-xs font-black text-blue-700">
+                                      {plan.plannedStartTime ? format(new Date(plan.plannedStartTime), 'HH:mm - dd/MM') : '--:-- - --/--'}
+                                    </span>
+                                  </div>
+                                </div>
+                                <div className="flex flex-col items-end">
+                                  <span className="text-[9px] font-black text-orange-400 uppercase tracking-widest pr-1">Dự kiến xong</span>
+                                  <div className="flex items-center gap-2 bg-orange-50/50 px-2.5 py-1.5 rounded-lg border border-orange-50">
+                                    <span className="text-xs font-black text-orange-700">
+                                      {plan.expectedCompletionTime ? format(new Date(plan.expectedCompletionTime), 'HH:mm - dd/MM') : '--:-- - --/--'}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+                              
+                              <div className="flex justify-between items-center border-t border-gray-50 pt-3">
+                                <div className="flex flex-col">
+                                  <span className="text-[9px] font-black text-gray-400 uppercase tracking-widest pl-1">Hạn hoàn thành (Target)</span>
+                                  <span className="text-[10px] font-bold text-gray-500 italic">
+                                    {format(new Date(plan.targetCompletionTime), 'HH:mm - dd/MM/yyyy')}
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  <button 
+                                    onClick={() => {
+                                      if (confirm('Đánh dấu kế hoạch này đã hoàn thành? Kế hoạch sẽ được chuyển sang mục Đã hoàn thành.')) {
+                                        storageService.completeGlazingPlan(plan.id);
+                                        setGlazingPlans(storageService.getGlazingPlans());
+                                        refreshData();
+                                      }
+                                    }}
+                                    className="p-2 text-blue-500 hover:text-white hover:bg-blue-500 rounded-lg transition-all font-bold text-[10px] uppercase tracking-widest flex items-center gap-1"
+                                  >
+                                    <CheckCircle2 size={16} /> 
+                                    Xong
+                                  </button>
+                                  <button 
+                                    onClick={() => {
+                                      if (confirm('Xóa kế hoạch dán kính này?')) {
+                                        storageService.deleteGlazingPlan(plan.id);
+                                        setGlazingPlans(storageService.getGlazingPlans());
+                                        refreshData();
+                                      }
+                                    }}
+                                    className="p-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
+                                  >
+                                    <Trash2 size={16} />
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="py-20 flex flex-col items-center justify-center text-gray-300 bg-gray-50 rounded-3xl border-2 border-dashed border-gray-200">
+                      <ClipboardList size={64} strokeWidth={1} />
+                      <p className="text-lg font-bold mt-4 uppercase tracking-widest opacity-50">Chưa có kế hoạch dán kính</p>
+                      <p className="text-sm opacity-50">Sử dụng form bên trên để tạo kế hoạch mới</p>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {planSubTab === 'COMPLETED' && (
+                <div className="space-y-4">
+                  {completedGlazingPlans.length > 0 ? (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {completedGlazingPlans.map((plan) => {
+                       const modelName = parts.find((p: any) => p.id === plan.modelId)?.name || plan.modelId;
+                       return (
+                         <div key={plan.id} className="bg-green-50 border-2 border-green-100 rounded-2xl p-5 hover:border-green-200 transition-all group flex flex-col justify-between opacity-80 hover:opacity-100">
+                           <div className="flex justify-between items-start mb-4">
+                             <div>
+                               <div className="text-[10px] font-black text-green-600 uppercase tracking-widest mb-1">{plan.id}</div>
+                               <h5 className="font-bold text-gray-900 leading-tight">{modelName}</h5>
+                               <div className="mt-1 text-xs text-green-700 font-medium">Đã in đủ: {plan.targetQuantity} MÁY</div>
+                             </div>
+                             <div className="px-3 py-1 rounded-full text-[10px] bg-green-100 text-green-700 font-black uppercase tracking-widest flex items-center gap-1">
+                               <CheckCircle2 size={12}/> XONG
+                             </div>
+                           </div>
+                           <div className="flex justify-between items-center border-t border-green-200 pt-3 mt-4">
+                             <div className="flex flex-col">
+                               <span className="text-[9px] font-black text-gray-500 uppercase tracking-widest pl-1">Target</span>
+                               <span className="text-[10px] font-bold text-gray-600 italic">
+                                 {format(new Date(plan.targetCompletionTime), 'HH:mm - dd/MM/yyyy')}
+                               </span>
+                             </div>
+                             <div className="flex gap-1">
+                              <button 
+                                onClick={() => {
+                                  // Hack to trigger status change safely
+                                  const plans = storageService.getGlazingPlans();
+                                  const planIndex = plans.findIndex(p => p.id === plan.id);
+                                  if(planIndex !== -1) {
+                                    plans[planIndex].status = 'IN_PROGRESS';
+                                    storageService.saveGlazingPlans(plans);
+                                    setGlazingPlans(storageService.getGlazingPlans());
+                                    refreshData();
+                                  }
+                                }}
+                                className="p-2 text-gray-400 hover:text-blue-500 hover:bg-blue-50 rounded-lg transition-all"
+                                title="Khôi phục"
+                              >
+                                <RotateCcw size={16} />
+                              </button>
+                               <button 
+                                 onClick={() => {
+                                   if (confirm('Xóa vĩnh viễn kế hoạch này?')) {
+                                     storageService.deleteGlazingPlan(plan.id);
+                                     setGlazingPlans(storageService.getGlazingPlans());
+                                     refreshData();
+                                   }
+                                 }}
+                                 className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
+                               >
+                                 <Trash2 size={16} />
+                               </button>
+                             </div>
+                           </div>
+                         </div>
+                       );
+                    })}
+                  </div>
+                  ) : (
+                    <div className="py-20 flex flex-col items-center justify-center text-gray-300 bg-gray-50 rounded-3xl border-2 border-dashed border-gray-200">
+                      <CheckCircle2 size={64} strokeWidth={1} />
+                      <p className="text-lg font-bold mt-4 uppercase tracking-widest opacity-50">Chưa có kế hoạch nào hoàn thành</p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+        {activeTab === 'QUICK_PRINT' && (
+          <div className="space-y-8">
+            {/* Step 1: Select Plan */}
+            <div className="bg-white p-8 rounded-3xl border border-blue-100 shadow-xl space-y-6">
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 bg-blue-600 rounded-2xl flex items-center justify-center text-white shadow-lg shadow-blue-200">
+                  <ClipboardList size={24} />
+                </div>
+                <div>
+                  <h3 className="text-xl font-black text-gray-900 uppercase tracking-tight">Chọn Kế Hoạch Dán Kính</h3>
+                  <p className="text-sm text-gray-500 font-bold italic">* Bạn cần chọn một kế hoạch đang thực hiện để in nhãn</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                {glazingPlans.filter(p => p.status !== 'COMPLETED').map(plan => (
+                  <button
+                    key={plan.id}
+                    onClick={() => setSelectedPlanIdForPrint(plan.id)}
+                    className={cn(
+                      "p-5 rounded-2xl border-2 transition-all text-left flex flex-col gap-2 relative group",
+                      selectedPlanIdForPrint === plan.id 
+                        ? "border-blue-600 bg-blue-50 shadow-lg shadow-blue-100" 
+                        : "border-gray-100 hover:border-blue-300 hover:bg-gray-50"
+                    )}
+                  >
+                    {selectedPlanIdForPrint === plan.id && (
+                      <div className="absolute -top-3 -right-3 w-8 h-8 bg-blue-600 text-white rounded-full flex items-center justify-center shadow-lg border-4 border-white">
+                        <Check size={16} strokeWidth={3} />
+                      </div>
+                    )}
+                    <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">{plan.modelId}</span>
+                    <span className="font-bold text-gray-800 text-lg">Hạn: {format(new Date(plan.targetCompletionTime), 'dd/MM')}</span>
+                    <div className="flex justify-between items-center mt-2">
+                      <span className="text-xs font-black text-blue-600 bg-blue-100/50 px-2 py-0.5 rounded-full">
+                        SL: {plan.targetQuantity}
+                      </span>
+                      <span className={cn(
+                        "text-[9px] font-black uppercase px-2 py-0.5 rounded-full",
+                        plan.status === 'IN_PROGRESS' ? "text-orange-600 bg-orange-100" : "text-blue-600 bg-blue-100"
+                      )}>
+                        {plan.status === 'IN_PROGRESS' ? 'Đang chạy' : 'Chờ'}
+                      </span>
+                    </div>
+                  </button>
+                ))}
+                {glazingPlans.filter(p => p.status !== 'COMPLETED').length === 0 && (
+                  <div className="col-span-full py-12 text-center bg-gray-50 rounded-2xl border-2 border-dashed border-gray-200">
+                    <p className="text-gray-400 font-bold uppercase tracking-widest text-sm">Chưa có kế hoạch nào đang hoạt động</p>
+                  </div>
+                )}
+              </div>
+
+            </div>
+
+            {/* Step 2: Show Components if Plan selected */}
+            {selectedPlanIdForPrint && (
+              <div className="space-y-6">
+                <div className="flex justify-between items-center px-4">
+                  <h4 className="font-black text-gray-900 uppercase tracking-tight flex items-center gap-3">
+                    <div className="w-1.5 h-5 bg-blue-600 rounded-full" />
+                    Linh kiện trong kế hoạch
+                  </h4>
+                  <div className="text-xs font-black text-gray-400 uppercase tracking-widest">
+                    Model: <span className="text-blue-600">{glazingPlans.find(p => p.id === selectedPlanIdForPrint)?.modelId}</span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {glazingPlanNorms.filter(n => n.appliedModel === glazingPlans.find(p => p.id === selectedPlanIdForPrint)?.modelId).map((norm, idx) => {
+                    const plan = glazingPlans.find(p => p.id === selectedPlanIdForPrint)!;
+                    return (
+                      <GlazingComponentPrintCard
+                        key={`${norm.id}-${idx}`}
+                        norm={norm}
+                        plan={plan}
+                        idx={idx}
+                        onPrint={(label) => {
+                          storageService.saveLabel(label);
+                          onPrint(label);
+                        }}
+                        onUpdateProgress={(qty) => {
+                          storageService.updateGlazingPlanProgress(plan.id, norm.id, qty);
+                          setGlazingPlans(storageService.getGlazingPlans());
+                          refreshData();
+                        }}
+                      />
+                    );
+                  })}
+                </div>
+
+                <div className="mt-12 space-y-4">
+                  <h4 className="font-black text-gray-900 uppercase tracking-tight flex items-center gap-3 px-4">
+                    <History size={20} className="text-gray-400" />
+                    Lịch sử in gần đây
+                  </h4>
+                  <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+                    <table className="w-full text-left text-sm">
+                      <thead className="bg-gray-50 border-b border-gray-100 text-gray-500 font-black uppercase text-[10px] tracking-widest">
+                        <tr>
+                          <th className="px-6 py-4">Thời gian</th>
+                          <th className="px-6 py-4">Tên linh kiện / Gói</th>
+                          <th className="px-6 py-4 text-center">Số lượng</th>
+                          <th className="px-6 py-4">Thao tác</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {labels && labels.filter((l: any) => l.planId === selectedPlanIdForPrint).sort((a: any, b: any) => b.timestamp - a.timestamp).map((label: any) => (
+                          <tr key={label.id} className="border-b border-gray-50 hover:bg-gray-50/50">
+                            <td className="px-6 py-4 font-mono text-[11px] font-bold text-gray-500">
+                              {format(label.timestamp, 'HH:mm:ss dd/MM')}
+                            </td>
+                            <td className="px-6 py-4">
+                              <div className="font-bold text-gray-900">{label.partName || label.partId}</div>
+                              <div className="text-[10px] font-mono text-gray-400 uppercase mt-1">{label.partId}</div>
+                            </td>
+                            <td className="px-6 py-4 text-center">
+                              <span className="font-black text-blue-600 bg-blue-50 px-3 py-1 rounded-full">{label.quantity}</span>
+                            </td>
+                            <td className="px-6 py-4">
+                              <button 
+                                onClick={() => onPrint(label)}
+                                className="flex items-center gap-2 text-blue-600 hover:text-blue-800 font-bold text-xs uppercase bg-white border border-blue-200 px-3 py-1.5 rounded-lg hover:border-blue-400 transition-all shadow-sm"
+                              >
+                                <Printer size={14} />
+                                In lại
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+            
+            {!selectedPlanIdForPrint && (
+              <div className="py-20 flex flex-col items-center justify-center text-gray-300 bg-gray-50 rounded-3xl border-2 border-dashed border-gray-200">
+                <Printer size={64} strokeWidth={1} />
+                <p className="text-lg font-bold mt-4 uppercase tracking-widest opacity-50">Chọn kế hoạch để bắt đầu in</p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'CONFIG' && (
+          <div className="space-y-12">
+            <div className="space-y-6 bg-blue-50/30 p-8 rounded-3xl border border-blue-100">
+              <hgroup>
+                <h3 className="text-xl font-black uppercase text-blue-800 tracking-tight">Định mức Kế hoạch Dán Kính</h3>
+                <p className="text-xs text-blue-600 font-bold uppercase tracking-widest mt-1 italic">Dành cho lập kế hoạch Gói Cánh / Gói Đỉnh</p>
+              </hgroup>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <div className="p-8 border-2 border-dashed border-blue-200 rounded-2xl bg-white text-center hover:bg-blue-50 transition-all group overflow-hidden">
+                  <input type="file" accept=".xlsx,.xls" onChange={handleGlazingPlanImport} className="hidden" id="glazing-plan-norm-upload" />
+                  <label htmlFor="glazing-plan-norm-upload" className="cursor-pointer flex flex-col items-center justify-center gap-4">
+                    <FileSpreadsheet size={40} className="text-blue-500 group-hover:scale-110 transition-transform" />
+                    <div>
+                      <div className="font-black text-blue-600 uppercase tracking-tight">Tải lên định mức dán kính</div>
+                      <div className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-2 leading-relaxed">
+                        Tên linh kiện | Định mức | Mã Linh Kiện | Model áp dụng
+                      </div>
+                    </div>
+                  </label>
+                </div>
+
+                <div className="bg-white rounded-2xl border border-blue-100 shadow-sm flex flex-col max-h-[300px]">
+                  <div className="p-4 border-b border-blue-50 flex justify-between items-center bg-blue-50/50">
+                    <span className="text-[10px] font-black uppercase text-blue-600 tracking-widest">Định mức đã tải ({glazingPlanNorms.length})</span>
+                    {glazingPlanNorms.length > 0 && (
+                      <button 
+                        onClick={() => { if(confirm('Xóa sạch định mức kế hoạch?')) { storageService.saveGlazingPlanNorms([]); setGlazingPlanNorms([]); } }}
+                        className="text-red-400 hover:text-red-600 transition-colors"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    )}
+                  </div>
+                  <div className="overflow-y-auto scrollbar-hide flex-1">
+                    {glazingPlanNorms.length > 0 ? (
+                      <table className="w-full text-left text-[11px]">
+                        <thead className="bg-gray-50 font-black uppercase text-gray-400">
+                          <tr>
+                            <th className="px-3 py-2">Linh kiện</th>
+                            <th className="px-3 py-2 text-center">T/G (giây)</th>
+                            <th className="px-3 py-2">Model áp dụng</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-50">
+                          {glazingPlanNorms.map((n, i) => (
+                            <tr key={i} className="hover:bg-blue-50/20">
+                              <td className="px-3 py-2 font-bold text-gray-700">{n.partName}</td>
+                              <td className="px-3 py-2 text-center font-black text-blue-600">{n.norm}</td>
+                              <td className="px-3 py-2 font-bold italic text-blue-500 bg-blue-50/30">{n.appliedModel || n.modelName}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    ) : (
+                      <div className="h-full flex items-center justify-center text-gray-400 italic text-[10px] uppercase font-bold tracking-widest">
+                        Chưa có dữ liệu định mức
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-8">
+              <div className="space-y-6">
+                <h3 className="text-xl font-bold uppercase text-blue-800">Cấu hình linh kiện (Kho IN)</h3>
+                <div className="p-6 border-2 border-dashed border-gray-300 rounded-xl bg-gray-50 text-center">
+                  <input type="file" accept=".xlsx,.xls" onChange={handleFileUpload} className="hidden" id="glazing-upload" />
+                  <label htmlFor="glazing-upload" className="cursor-pointer flex flex-col items-center justify-center gap-4">
+                    <FileSpreadsheet size={48} className="text-blue-500 opacity-50" />
+                    <div>
+                      <div className="font-bold text-blue-600 text-lg">Click tải lên Excel (IN)</div>
+                      <div className="text-sm text-gray-500 mt-2">Cột yêu cầu: Tên linh kiện | Mã linh kiện | Công đoạn tiếp nhận</div>
+                    </div>
+                  </label>
+                </div>
+
+                {configs.length > 0 && (
+                  <table className="w-full text-left bg-white text-sm">
+                    <thead><tr className="bg-gray-100 text-gray-500 uppercase"><th className="p-3">Mã</th><th className="p-3">Nguồn</th></tr></thead>
+                    <tbody>
+                      {configs.map((c) => (
+                        <tr key={c.partId} className="border-b">
+                          <td className="p-3 font-mono text-xs">{c.partId}</td>
+                          <td className="p-3 font-bold">{STAGES.find(s => s.id === c.sourceStageId)?.name || c.sourceStageId}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+
+              <div className="space-y-6">
+                <h3 className="text-xl font-bold uppercase text-orange-800">Cấu hình Gói Thành Phẩm (Kho OUT)</h3>
+                <div className="p-6 border-2 border-dashed border-gray-300 rounded-xl bg-gray-50 text-center">
+                  <input type="file" accept=".xlsx,.xls" onChange={handleOutFileUpload} className="hidden" id="glazing-upload-out" />
+                  <label htmlFor="glazing-upload-out" className="cursor-pointer flex flex-col items-center justify-center gap-4">
+                    <FileSpreadsheet size={48} className="text-orange-500 opacity-50" />
+                    <div>
+                      <div className="font-bold text-orange-600 text-lg">Click tải lên Excel (OUT)</div>
+                      <div className="text-sm text-gray-500 mt-2">Tên linh kiện thành phẩm | Tên linh kiện thành phẩm con | Mã...</div>
+                    </div>
+                  </label>
+                </div>
+
+                {outConfigs.length > 0 && (
+                  <div className="space-y-4">
+                    {outConfigs.map(c => (
+                      <div key={c.finalPartName} className="border border-gray-200 rounded-lg overflow-hidden">
+                        <div className="bg-orange-50 font-bold p-3 border-b border-gray-200">
+                          {c.finalPartName}
+                        </div>
+                        <div className="p-3 bg-white space-y-2">
+                          {c.subParts.map((sp, idx) => (
+                            <div key={`${sp.partId}-${idx}`} className="flex justify-between text-sm border-b border-gray-100 last:border-0 pb-2 last:pb-0">
+                              <span className="text-gray-600">{sp.partName}</span>
+                              <span className="font-mono text-xs opacity-70">{sp.partId}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'INVENTORY' && (
+          <div>
+            <h3 className="text-xl font-bold uppercase mb-6 flex items-center gap-2">Tồn kho IN Dán Kính</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {inventory.filter(i => i.location === 'IN' && i.stageId === 'GLAZING' && i.quantity > 0).map(i => (
+                <div key={i.partId} className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm flex justify-between items-center hover:border-blue-300 transition-all">
+                  <div>
+                    <div className="font-bold text-gray-900 leading-tight mb-1">{parts.find((p: any) => p.id === i.partId)?.name || i.partId}</div>
+                    <div className="font-mono text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded inline-block">{i.partId}</div>
+                  </div>
+                  <div className="font-black text-2xl text-blue-600 pl-4">{i.quantity}</div>
+                </div>
+              ))}
+              {inventory.filter(i => i.location === 'IN' && i.stageId === 'GLAZING' && i.quantity > 0).length === 0 && (
+                <div className="col-span-full py-12 text-center text-gray-400 border-2 border-dashed border-gray-100 rounded-xl italic">
+                  Không có linh kiện nào trong kho IN.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'INBOUND' && (
+          <div>
+            <h3 className="text-xl font-bold uppercase mb-6 bg-blue-50 text-blue-800 p-4 rounded-xl border border-blue-100">Tiếp nhận từ công đoạn khác</h3>
+            <table className="w-full text-left text-sm mt-4">
+              <thead><tr className="bg-gray-100 text-gray-500 uppercase text-xs tracking-wider"><th className="p-4">Linh kiện</th><th className="p-4 w-40 text-center">Slg tại OUT nguồn</th><th className="p-4 w-64">Thao tác</th></tr></thead>
+              <tbody>
+                {configs.map(c => {
+                  const sourceQty = globalInventory.find((i: any) => i.partId.toUpperCase() === c.partId.toUpperCase() && i.stageId === c.sourceStageId && i.location === 'OUT')?.quantity || 0;
+                  return (
+                    <tr key={c.partId} className="border-b">
+                      <td className="p-4 border-r">
+                        <div className="font-bold text-base">{c.partName}</div>
+                        <div className="font-mono text-xs opacity-50">{c.partId}</div>
+                        <div className="inline-block mt-2 px-2 py-1 bg-gray-100 rounded text-xs font-bold text-gray-600 border border-gray-200">
+                          Từ: {STAGES.find(s => s.id === c.sourceStageId)?.name || c.sourceStageId}
+                        </div>
+                      </td>
+                      <td className="p-4 border-r text-center">
+                        <div className="font-bold text-xl">{sourceQty}</div>
+                      </td>
+                      <td className="p-4">
+                        <div className="flex bg-gray-50 rounded-xl overflow-hidden border border-gray-200 p-1">
+                          <input 
+                            type="number"
+                            value={inboundQty[c.partId] || ''}
+                            onChange={e => setInboundQty({...inboundQty, [c.partId]: e.target.value})}
+                            placeholder="SL"
+                            min="1"
+                            max={sourceQty}
+                            className="bg-transparent border-none p-3 w-20 outline-none text-center font-bold"
+                          />
+                          <button 
+                            onClick={() => handleReceive(c)}
+                            disabled={sourceQty === 0}
+                            className={cn("flex-1 p-3 font-bold uppercase text-white transition-all", sourceQty > 0 ? "bg-blue-600 hover:bg-blue-700" : "bg-gray-300")}
+                          >Nhập</button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {activeTab === 'OUTBOUND' && (
+          <div className="space-y-12">
+            <div>
+              <h3 className="text-xl font-bold uppercase mb-6 bg-orange-50 text-orange-800 p-4 rounded-xl border border-orange-100 flex items-center gap-3">
+                <Package size={24} />
+                Đóng gói thành phẩm (Chuyển từ IN sang OUT)
+              </h3>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-4">
+                {outConfigs.map(c => {
+                  const requiredQtys: Record<string, number> = {};
+                  for (const sp of c.subParts) {
+                    if (!requiredQtys[sp.partId]) requiredQtys[sp.partId] = 0;
+                    requiredQtys[sp.partId] += 1;
+                  }
+
+                  // For each unique subpart, check max possible assemblies
+                  let maxPossible = Infinity;
+                  for (const partId of Object.keys(requiredQtys)) {
+                    const reqPerItem = requiredQtys[partId];
+                    const invQt = inventory.find(i => i.partId === partId && i.location === 'IN' && i.stageId === 'GLAZING')?.quantity || 0;
+                    const possible = Math.floor(invQt / reqPerItem);
+                    if (possible < maxPossible) maxPossible = possible;
+                  }
+                  if (maxPossible === Infinity) maxPossible = 0;
+
+                  return (
+                    <div key={c.finalPartName} className="border border-gray-200 rounded-xl overflow-hidden shadow-sm bg-white">
+                      <div className="bg-gray-50 border-b border-gray-200 p-4">
+                        <div className="font-bold text-lg text-gray-900">{c.finalPartName}</div>
+                        <div className="text-sm font-medium text-orange-600 mt-1">Có thể đóng gói: {maxPossible}</div>
+                      </div>
+                      <div className="p-4 space-y-3">
+                        <div className="text-xs font-bold uppercase text-gray-400 mb-2">Linh kiện yêu cầu (từ kho IN Dán Kính)</div>
+                        {c.subParts.map((sp, idx) => {
+                          const invQt = inventory.find(i => i.partId === sp.partId && i.location === 'IN' && i.stageId === 'GLAZING')?.quantity || 0;
+                          return (
+                            <div key={`${sp.partId}-${idx}`} className="flex justify-between items-center text-sm">
+                              <div>
+                                <div className="font-medium text-gray-700">{sp.partName}</div>
+                                <div className="font-mono text-xs text-gray-400">{sp.partId}</div>
+                              </div>
+                              <div className={cn("font-bold", invQt > 0 ? "text-green-600" : "text-red-500")}>
+                                Kho IN: {invQt}
+                              </div>
+                            </div>
+                          )
+                        })}
+                        <div className="pt-4 border-t border-gray-100 flex gap-2">
+                          <input 
+                            type="number"
+                            value={outboundQty[c.finalPartName] || ''}
+                            onChange={e => setOutboundQty({...outboundQty, [c.finalPartName]: e.target.value})}
+                            placeholder="SL"
+                            min="1"
+                            max={maxPossible || 1}
+                            disabled={maxPossible === 0}
+                            className="w-20 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg font-bold outline-none focus:border-blue-500 disabled:opacity-50"
+                          />
+                          <button 
+                            onClick={() => handleTransferOut(c.finalPartName)}
+                            disabled={maxPossible === 0}
+                            className="flex-1 bg-blue-600 text-white font-bold py-2 rounded-lg hover:bg-blue-700 transition-colors uppercase text-xs disabled:bg-gray-400 disabled:cursor-not-allowed"
+                          >
+                            Đóng gói & Nhập OUT
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+              {outConfigs.length === 0 && (
+                <div className="text-center text-gray-500 py-12 bg-gray-50 rounded-xl border-2 border-dashed border-gray-200">
+                  Chưa có cấu hình Gói Thành Phẩm OUT. Vui lòng tải lên ở tab Cấu hình.
+                </div>
+              )}
+            </div>
+
+            {/* Warehouse OUT and Export to DCLR section */}
+            <div className="pt-12 border-t-4 border-dashed border-gray-100">
+              <h3 className="text-xl font-bold uppercase mb-6 bg-gray-900 text-white p-4 rounded-xl border border-gray-800 flex items-center gap-3">
+                <ArrowUpRight size={24} />
+                Linh kiện/Gói thành phẩm sẵn sàng xuất sang DCLR
+              </h3>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                {inventory.filter(i => i.stageId === 'GLAZING' && i.location === 'OUT' && i.quantity > 0).map(i => {
+                  const isPseudo = i.partId.startsWith('GLZ-OUT-');
+                  const displayName = isPseudo ? i.partId.replace('GLZ-OUT-', '') : (parts.find((p: any) => p.id === i.partId)?.name || i.partId);
+                  
+                  return (
+                    <div key={i.partId} className="bg-white p-6 rounded-2xl shadow-lg border border-orange-100 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 group hover:border-orange-300 transition-all">
+                      <div className="flex-1">
+                        <div className="font-bold text-gray-900 text-lg">{displayName}</div>
+                        {isPseudo ? (
+                          <div className="font-mono text-[10px] uppercase font-black text-orange-600 mt-1 bg-orange-100 px-2 py-0.5 rounded inline-block">Gói thành phẩm</div>
+                        ) : (
+                          <div className="font-mono text-xs opacity-50">{i.partId}</div>
+                        )}
+                        <div className="mt-2 text-3xl font-black text-[#F27D26]">{i.quantity}</div>
+                      </div>
+                      
+                      <div className="flex flex-col items-end gap-2 w-full sm:w-auto">
+                        <div className="flex bg-white rounded-lg border-2 border-orange-200 overflow-hidden shadow-sm h-12 w-full sm:w-auto">
+                          <input 
+                            type="number"
+                            value={glazingOutQty[i.partId] || ''}
+                            onChange={e => setGlazingOutQty({...glazingOutQty, [i.partId]: e.target.value})}
+                            placeholder="SL"
+                            className="w-full sm:w-24 px-3 text-center font-black outline-none border-r border-orange-100 text-lg text-orange-600"
+                          />
+                          <button 
+                            onClick={() => handleGlazingExport(i)}
+                            className="px-6 bg-[#F27D26] text-white font-black text-xs uppercase hover:bg-orange-700 transition-all active:scale-95 flex items-center gap-2 whitespace-nowrap"
+                          >
+                            <ArrowUpRight size={16} />
+                            XUẤT DCLR
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+                {inventory.filter(i => i.stageId === 'GLAZING' && i.location === 'OUT' && i.quantity > 0).length === 0 && (
+                  <div className="col-span-full text-center py-12 text-gray-400 italic bg-gray-50 rounded-2xl border-2 border-dashed border-gray-200">
+                    Chưa có linh kiện nào trong kho OUT Dán Kính...
+                  </div>
+                )}
+              </div>
+
+              {pendingGlazingLabels.length > 0 && (
+                <div className="mt-12 bg-white rounded-3xl border-4 border-[#F27D26] shadow-2xl overflow-hidden">
+                  <div className="bg-[#F27D26] p-6 flex justify-between items-center">
+                    <div>
+                      <h3 className="text-white font-black text-2xl tracking-tighter uppercase italic flex items-center gap-3">
+                        <Printer size={28} />
+                        DANH SÁCH CHỜ IN NHÃN QR XUẤT KHO
+                      </h3>
+                    </div>
+                    <div className="bg-white/20 px-4 py-2 rounded-full text-white font-black">
+                      {pendingGlazingLabels.length} Nhãn
+                    </div>
+                  </div>
+                  <div className="p-8 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 bg-orange-50/30">
+                    {pendingGlazingLabels.map((l: any) => {
+                      const isPseudo = l.partId.startsWith('GLZ-OUT-');
+                      const displayName = isPseudo ? l.partId.replace('GLZ-OUT-', '') : (parts.find((p: any) => p.id === l.partId)?.name || l.partId);
+                      
+                      return (
+                        <div key={l.id} className="bg-white p-6 rounded-2xl shadow-lg border-2 border-orange-200 hover:border-orange-500 transition-all group relative overflow-hidden">
+                          <div className="flex flex-col gap-4">
+                            <div>
+                              <div className="text-[10px] uppercase font-black tracking-widest text-[#F27D26] mb-1">Mã: {l.partId}</div>
+                              <div className="font-bold text-gray-900 leading-tight h-10 line-clamp-2">{displayName}</div>
+                            </div>
+                            <div className="flex items-end justify-between border-t border-orange-100 pt-4">
+                              <div>
+                                <div className="text-[10px] uppercase font-bold text-gray-400">Số lượng:</div>
+                                <div className="text-3xl font-black text-[#F27D26]">{l.quantity}</div>
+                              </div>
+                              <button 
+                                onClick={() => onPrint({ ...l, partName: displayName })}
+                                className="bg-[#F27D26] text-white p-4 rounded-xl shadow-lg hover:shadow-orange-200 hover:scale-110 active:scale-95 transition-all flex items-center gap-2"
+                              >
+                                <Printer size={20} />
+                                <span className="font-black uppercase tracking-tighter">IN NHÃN QC</span>
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </motion.div>
+  );
+}
+
+function InboundView({ selectedStage, setSelectedStage, onScanSuccess, parts, setDefectModal }: any) {
   const [targetLocation, setTargetLocation] = useState<'IN' | 'OUT'>('IN');
   const [scanInput, setScanInput] = useState('');
   const [lastScanned, setLastScanned] = useState<any>(null);
@@ -3235,7 +5984,15 @@ function InboundView({ selectedStage, setSelectedStage, onScanSuccess, parts }: 
                 READY
               </div>
             </div>
-            <p className="text-xs font-mono text-gray-400 uppercase tracking-widest text-center">Hệ thống xử lý sau khi nhập mã hoặc súng quét gửi dữ liệu</p>
+            <div className="flex gap-4">
+              <button 
+                type="submit"
+                className="flex-1 h-20 bg-gray-900 text-white rounded-3xl font-bold uppercase tracking-widest hover:bg-black transition-all flex items-center justify-center gap-3 shadow-xl"
+              >
+                <CheckCircle2 size={24} />
+                Xác nhận
+              </button>
+            </div>
           </form>
         </div>
 
@@ -3315,12 +6072,23 @@ function InboundView({ selectedStage, setSelectedStage, onScanSuccess, parts }: 
                 </div>
               )}
 
-              <button 
-                onClick={() => setLastScanned(null)}
-                className="w-full py-4 text-sm font-bold uppercase tracking-widest text-gray-400 hover:text-[#141414] transition-colors"
-              >
-                Đóng thông báo
-              </button>
+              <div className="flex gap-4 w-full">
+                <button 
+                  onClick={() => setLastScanned(null)}
+                  className="flex-1 py-4 text-sm font-bold uppercase tracking-widest text-gray-400 hover:text-[#141414] transition-colors border-2 border-gray-100 rounded-xl"
+                >
+                  Quét tiếp
+                </button>
+                {lastScanned.status === 'success' && (
+                  <button 
+                    onClick={() => setDefectModal({ partId: lastScanned.partId, stageId: selectedStage, poId: lastScanned.poId })}
+                    className="flex-1 py-4 text-sm font-bold uppercase tracking-widest text-red-600 hover:bg-red-50 transition-colors border-2 border-red-100 rounded-xl flex items-center justify-center gap-2"
+                  >
+                    <AlertCircle size={18} />
+                    Báo lỗi (NG)
+                  </button>
+                )}
+              </div>
             </motion.div>
           ) : (
             <div className="bg-gray-100 rounded-3xl border-2 border-dashed border-gray-300 h-full flex flex-col items-center justify-center p-12 text-center text-gray-400">
@@ -3341,14 +6109,15 @@ function SettingsView({ parts, onPartsChange, labelSettings, onLabelSettingsChan
   onLabelSettingsChange: (s: any) => void,
   key?: string 
 }) {
-  const [newPart, setNewPart] = useState<Part>({ id: '', name: '', unit: 'Cái', level: 1, skipBending: false, skipWelding: false });
+  const [newPart, setNewPart] = useState<Part>({ id: '', name: '', unit: 'Cái', level: 1, skipLaser: false, skipBending: false, skipWelding: false, skipPainting: false, hasPaintingPO: false });
   const [editingId, setEditingId] = useState<string | null>(null);
   const [isImporting, setIsImporting] = useState(false);
   const [isImportingBOM, setIsImportingBOM] = useState(false);
   const [isImportingBOMV2, setIsImportingBOMV2] = useState(false);
   const [isImportingModelBOM, setIsImportingModelBOM] = useState(false);
+  const [isImportingTransformations, setIsImportingTransformations] = useState(false);
 
-  const [activeSettingsTab, setActiveSettingsTab] = useState<'parts' | 'bom' | 'label' | 'bom_v2' | 'model_bom'>('parts');
+  const [activeSettingsTab, setActiveSettingsTab] = useState<'parts' | 'bom' | 'label' | 'bom_v2' | 'model_bom' | 'transformations'>('parts');
 
   const [showResetModal, setShowResetModal] = useState(false);
   const [resetPassword, setResetPassword] = useState('');
@@ -3378,28 +6147,72 @@ function SettingsView({ parts, onPartsChange, labelSettings, onLabelSettingsChan
 
         console.log('Raw BOM data:', data);
 
-        // Expected columns: ParentID (Level 3), ChildID (Level 2), ComponentWeight, ScrapWeight
-        const importedBOM: BOMDefinition[] = data.map(row => {
-          const parentId = String(row['ParentID'] || row['Mã cha'] || row['Level 3 ID'] || '').trim();
-          const childId = String(row['ChildID'] || row['Mã con'] || row['Level 2 ID'] || '').trim();
-          const compWeight = parseFloat(row['ComponentWeight'] || row['Khối lượng linh kiện'] || row['PartWeight'] || '0');
-          const scrapWeight = parseFloat(row['ScrapWeight'] || row['Khối lượng phế'] || row['Scrap'] || '0');
+        const bomMap = new Map<string, BOMDefinition>();
+        
+        data.forEach(row => {
+          let childId = '';
+          let parentId = '';
+          let weightVal: any = 0;
+
+          Object.keys(row).forEach(key => {
+            const k = key.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, '').replace(/\n/g, '');
+            if (k.includes('malinhkiencon') || k === 'malinhkien' || k.includes('childid') || k.includes('macon')) {
+               childId = row[key];
+            } else if (k.includes('malinhkiencha') || k.includes('malinhkienton') || k.includes('parentid') || k.includes('macha')) {
+               parentId = row[key];
+            } else if (k.includes('khoiluong') || k.includes('componentweight') || k.includes('kg') || k.includes('weight')) {
+               weightVal = row[key];
+            }
+          });
+
+          // Fallbacks for direct access just in case
+          if (!childId) childId = row['Mã linh kiện con'] || row['Mã linh kiện'] || row['ChildID'] || row['Mã con'];
+          if (!parentId) parentId = row['Mã linh kiện cha'] || row['Mã linh kiện tôn'] || row['ParentID'] || row['Mã cha'];
+          if (!weightVal) weightVal = row['Khối lượng (Kg)'] ?? row['Khối lượng'] ?? row['ComponentWeight'] ?? row['Khối lượng linh kiện'];
+
+          childId = String(childId || '').trim();
+          parentId = String(parentId || '').trim();
           
-          return {
-            parentPartId: parentId,
-            childPartId: childId,
-            componentWeight: compWeight,
-            scrapWeight: scrapWeight
-          };
-        }).filter(b => b.parentPartId && b.childPartId && (b.componentWeight > 0 || b.scrapWeight > 0));
+          if (!childId) return;
+
+          let weight = 0;
+          if (typeof weightVal === 'string') {
+            const clean = weightVal.replace(/[()]/g, '').replace(/,/g, '.');
+            weight = parseFloat(clean) || 0;
+          } else if (typeof weightVal === 'number') {
+            weight = Math.abs(weightVal);
+          }
+          
+          if (!bomMap.has(childId)) {
+            bomMap.set(childId, {
+              parentPartId: '',
+              childPartId: childId,
+              componentWeight: 0,
+              scrapWeight: 0
+            });
+          }
+
+          const def = bomMap.get(childId)!;
+          
+          const upperParentId = parentId.toUpperCase();
+          if (upperParentId.includes('PL-') || upperParentId.includes('PHẾ') || upperParentId.includes('P-')) {
+            def.scrapWeight += weight;
+          } else {
+            if (parentId && !def.parentPartId) def.parentPartId = parentId; // Keep the first valid parent ID
+            def.componentWeight += weight;
+          }
+        });
+
+        const importedBOM = Array.from(bomMap.values()).filter(b => b.childPartId && (b.componentWeight > 0 || b.scrapWeight > 0));
 
         if (importedBOM.length === 0) {
-          alert('Không tìm thấy dữ liệu định mức hợp lệ. Vui lòng kiểm tra tiêu đề cột (ParentID, ChildID, ComponentWeight, ScrapWeight).');
+          alert('Không tìm thấy dữ liệu định mức hợp lệ. Vui lòng kiểm tra tiêu đề cột (Mã linh kiện, Mã linh kiện tôn, Khối lượng (Kg)).\n\nDữ liệu thô dòng 1:\n' + JSON.stringify(data[0] || {}));
           setIsImportingBOM(false);
           return;
         }
 
         storageService.saveBOM(importedBOM);
+        onPartsChange();
         alert(`Đã nhập thành công ${importedBOM.length} định mức sản xuất!`);
       } catch (err) {
         console.error('BOM Import Error:', err);
@@ -3435,8 +6248,11 @@ function SettingsView({ parts, onPartsChange, labelSettings, onLabelSettingsChan
         const itemIdx = headers.findIndex(h => h === 'item' || h === 'mã linh kiện' || h === 'id');
         const descIdx = headers.findIndex(h => h === 'description' || h === 'tên linh kiện' || h === 'name');
         const unitIdx = headers.findIndex(h => h === 'unit' || h === 'đvt');
+        const skipLaserIdx = headers.findIndex(h => h === 'skiplaser' || h === 'bỏ qua laser' || h === 'miễn laser' || h === 'skip laser');
         const skipBendIdx = headers.findIndex(h => h === 'skipbending' || h === 'bỏ qua chấn' || h === 'miễn chấn' || h === 'skip bend');
         const skipWeldIdx = headers.findIndex(h => h === 'skipwelding' || h === 'bỏ qua hàn' || h === 'miễn hàn' || h === 'skip weld');
+        const skipPaintIdx = headers.findIndex(h => h === 'skippainting' || h === 'bỏ qua sơn' || h === 'miễn sơn' || h === 'skip paint');
+        const hasPaintingPOIdx = headers.findIndex(h => h === 'haspaintingpo' || h === 'có po tại công đoạn sơn' || h === 'po sơn');
 
         if (itemIdx === -1 || descIdx === -1) {
           alert('Không tìm thấy cột Item hoặc Description trong file Excel.');
@@ -3465,8 +6281,11 @@ function SettingsView({ parts, onPartsChange, labelSettings, onLabelSettingsChan
             name: String(row[descIdx] || '').trim(),
             unit: String(unitIdx !== -1 ? row[unitIdx] : 'Cái').trim(),
             level: level,
+            skipLaser: skipLaserIdx !== -1 ? isTruthful(row[skipLaserIdx]) : false,
             skipBending: skipBendIdx !== -1 ? isTruthful(row[skipBendIdx]) : false,
-            skipWelding: skipWeldIdx !== -1 ? isTruthful(row[skipWeldIdx]) : false
+            skipWelding: skipWeldIdx !== -1 ? isTruthful(row[skipWeldIdx]) : false,
+            skipPainting: skipPaintIdx !== -1 ? isTruthful(row[skipPaintIdx]) : false,
+            hasPaintingPO: hasPaintingPOIdx !== -1 ? isTruthful(row[hasPaintingPOIdx]) : false
           };
         }).filter(p => p.id && p.name);
 
@@ -3515,7 +6334,7 @@ function SettingsView({ parts, onPartsChange, labelSettings, onLabelSettingsChan
     }
 
     storageService.saveParts(updatedParts);
-    setNewPart({ id: '', name: '', unit: 'Cái', level: 1 });
+    setNewPart({ id: '', name: '', unit: 'Cái', level: 1, hasPaintingPO: false });
     setEditingId(null);
     onPartsChange();
   };
@@ -3524,8 +6343,11 @@ function SettingsView({ parts, onPartsChange, labelSettings, onLabelSettingsChan
     setNewPart({
       ...part,
       level: part.level || 1,
+      skipLaser: !!part.skipLaser,
       skipBending: !!part.skipBending,
-      skipWelding: !!part.skipWelding
+      skipWelding: !!part.skipWelding,
+      skipPainting: !!part.skipPainting,
+      hasPaintingPO: !!part.hasPaintingPO
     });
     setEditingId(part.id);
   };
@@ -3597,7 +6419,16 @@ function SettingsView({ parts, onPartsChange, labelSettings, onLabelSettingsChan
           </div>
           <div className="space-y-4">
             <label className="text-xs font-bold uppercase opacity-50">Cấu hình Quy trình</label>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-4 gap-4">
+              <label className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg cursor-pointer hover:bg-gray-100 transition-colors">
+                <input 
+                  type="checkbox" 
+                  checked={!!newPart.skipLaser} 
+                  onChange={e => setNewPart({...newPart, skipLaser: e.target.checked})}
+                  className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                />
+                <span className="text-sm font-medium">Bỏ qua Laser</span>
+              </label>
               <label className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg cursor-pointer hover:bg-gray-100 transition-colors">
                 <input 
                   type="checkbox" 
@@ -3615,6 +6446,24 @@ function SettingsView({ parts, onPartsChange, labelSettings, onLabelSettingsChan
                   className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                 />
                 <span className="text-sm font-medium">Bỏ qua Hàn</span>
+              </label>
+              <label className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg cursor-pointer hover:bg-gray-100 transition-colors">
+                <input 
+                  type="checkbox" 
+                  checked={!!newPart.skipPainting} 
+                  onChange={e => setNewPart({...newPart, skipPainting: e.target.checked})}
+                  className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                />
+                <span className="text-sm font-medium">Bỏ qua Sơn</span>
+              </label>
+              <label className="flex items-center gap-3 p-3 bg-blue-50 rounded-lg cursor-pointer hover:bg-blue-100 transition-colors border border-blue-100 col-span-2">
+                <input 
+                  type="checkbox" 
+                  checked={!!newPart.hasPaintingPO} 
+                  onChange={e => setNewPart({...newPart, hasPaintingPO: e.target.checked})}
+                  className="w-5 h-5 rounded border-blue-300 text-blue-600 focus:ring-blue-500"
+                />
+                <span className="text-sm font-bold text-blue-700">Có PO tại công đoạn sơn</span>
               </label>
             </div>
           </div>
@@ -3739,6 +6588,15 @@ function SettingsView({ parts, onPartsChange, labelSettings, onLabelSettingsChan
           >
             Cấu hình khổ nhãn
           </button>
+          <button 
+            onClick={() => setActiveSettingsTab('transformations')}
+            className={cn(
+              "flex-1 py-5 text-base font-bold uppercase tracking-widest transition-all border-b-2",
+              activeSettingsTab === 'transformations' ? "border-blue-600 text-blue-600" : "border-transparent text-gray-400 hover:text-gray-600"
+            )}
+          >
+            Chuyển đổi linh kiện
+          </button>
         </div>
 
         {activeSettingsTab === 'bom_v2' ? (
@@ -3770,18 +6628,19 @@ function SettingsView({ parts, onPartsChange, labelSettings, onLabelSettingsChan
                         const ws = wb.Sheets[wsname];
                         const data = XLSX.utils.sheet_to_json(ws) as any[];
                         
-                        // Expected columns: ResultID, IngredientID, Quantity, SkipBending
+                        // Expected columns: ResultID, IngredientID, Quantity, SkipBending, ApplicableModel
                         const imported: BOMDefinitionV2[] = data.map(row => ({
                           resultPartId: String(row['ResultID'] || row['Mã thành phẩm'] || row['Mã cha'] || '').trim(),
                           ingredientPartId: String(row['IngredientID'] || row['Mã linh kiện'] || row['Mã con'] || '').trim(),
                           quantity: parseFloat(row['Quantity'] || row['Số lượng'] || '1'),
-                          skipBending: row['SkipBending'] === 'Y' || row['SkipBending'] === true || row['Bỏ qua chấn'] === 'X'
+                          applicableModel: row['Model áp dụng'] || row['Model'] || row['ApplicableModel'] ? String(row['Model áp dụng'] || row['Model'] || row['ApplicableModel']).trim() : undefined,
                         })).filter(b => b.resultPartId && b.ingredientPartId && b.quantity > 0);
 
                         if (imported.length === 0) {
                           alert('Không tìm thấy dữ liệu hợp lệ. Cần các cột: ResultID, IngredientID, Quantity');
                         } else {
                           storageService.saveBOMV2(imported);
+                          onPartsChange();
                           alert(`Đã nhập thành công ${imported.length} định mức Hàn!`);
                         }
                       } catch (err) {
@@ -3801,6 +6660,7 @@ function SettingsView({ parts, onPartsChange, labelSettings, onLabelSettingsChan
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="bg-gray-50 border-b border-gray-200">
+                    <th className="p-6 text-xs font-bold uppercase opacity-50">Model áp dụng</th>
                     <th className="p-6 text-xs font-bold uppercase opacity-50">Thành phẩm (Level 1)</th>
                     <th className="p-6 text-xs font-bold uppercase opacity-50">Linh kiện thành phần (Level 2)</th>
                     <th className="p-6 text-xs font-bold uppercase opacity-50 text-center">Số lượng/1 đơn vị</th>
@@ -3809,11 +6669,18 @@ function SettingsView({ parts, onPartsChange, labelSettings, onLabelSettingsChan
                 <tbody>
                   {storageService.getBOMV2().length === 0 ? (
                     <tr>
-                      <td colSpan={3} className="p-20 text-center text-gray-400 italic">Chưa có dữ liệu định mức Hàn. Vui lòng nhập từ Excel.</td>
+                      <td colSpan={4} className="p-20 text-center text-gray-400 italic">Chưa có dữ liệu định mức Hàn. Vui lòng nhập từ Excel.</td>
                     </tr>
                   ) : (
                     storageService.getBOMV2().map((b, i) => (
                       <tr key={i} className="border-b border-gray-100 hover:bg-gray-50 transition-colors">
+                        <td className="p-6 font-mono text-sm opacity-80 whitespace-nowrap">
+                          {b.applicableModel ? (
+                            <span className="bg-purple-100 text-purple-700 px-3 py-1 rounded-full font-bold">{b.applicableModel}</span>
+                          ) : (
+                            <span className="opacity-40 italic">Tất cả Model</span>
+                          )}
+                        </td>
                         <td className="p-6">
                           <div className="font-bold">{getProcessValue(parts.find(p => p.id === b.resultPartId)?.name, parts.find(p => p.id === b.resultPartId), 'WELDING', 'OUT')}</div>
                           <div className="text-xs font-mono opacity-50">{getProcessValue(b.resultPartId, parts.find(p => p.id === b.resultPartId), 'WELDING', 'OUT')}</div>
@@ -3872,6 +6739,7 @@ function SettingsView({ parts, onPartsChange, labelSettings, onLabelSettingsChan
                           alert('Không tìm thấy dữ liệu hợp lệ. Cần các cột: ModelID, PartID, Quantity');
                         } else {
                           storageService.saveModelBOM(imported);
+                          onPartsChange();
                           alert(`Đã nhập thành công ${imported.length} định mức Model!`);
                         }
                       } catch (err) {
@@ -4012,6 +6880,190 @@ function SettingsView({ parts, onPartsChange, labelSettings, onLabelSettingsChan
               </div>
             </div>
           </div>
+        ) : activeSettingsTab === 'transformations' ? (
+          <div className="p-10 space-y-8">
+            <div className="flex justify-between items-center">
+              <div className="flex items-center gap-4">
+                <div className="bg-cyan-600 p-3 rounded-xl text-white">
+                  <RotateCcw size={24} />
+                </div>
+                <div>
+                  <h2 className="text-2xl font-bold tracking-tight">Cài đặt chuyển đổi linh kiện</h2>
+                  <p className="text-sm text-gray-500">Tự động chuyển đổi tên linh kiện khi nhập kho công đoạn Sơn</p>
+                </div>
+              </div>
+              <div className="flex gap-4">
+                <button 
+                  onClick={() => {
+                    if (!confirm('Bạn có chắc chắn muốn đảo ngược tất cả dữ liệu Nguồn và Đích trong bảng này không?')) return;
+                    const current = storageService.getTransformations();
+                    const swapped = current.map(t => ({
+                      ...t,
+                      sourcePartId: t.targetPartId,
+                      targetPartId: t.sourcePartId
+                    }));
+                    storageService.saveTransformations(swapped);
+                    onPartsChange();
+                    alert('Đã đảo ngược dữ liệu thành công!');
+                  }}
+                  className="bg-white border-2 border-orange-500 text-orange-500 px-6 py-3 rounded-xl font-bold uppercase hover:bg-orange-50 transition-all flex items-center gap-2"
+                >
+                  <RotateCcw size={20} />
+                  Đảo ngược Nguồn/Đích
+                </button>
+                <label className="bg-white border-2 border-cyan-600 text-cyan-600 px-6 py-3 rounded-xl font-bold uppercase cursor-pointer hover:bg-cyan-100 transition-all flex items-center gap-2">
+                  <FileUp size={20} />
+                  {isImportingTransformations ? 'Đang xử lý...' : 'Nhập Excel Chuyển đổi'}
+                  <input type="file" accept=".xlsx, .xls" className="hidden" onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    setIsImportingTransformations(true);
+                    const reader = new FileReader();
+                    reader.onload = (evt) => {
+                      try {
+                        const bstr = evt.target?.result;
+                        const wb = XLSX.read(bstr, { type: 'binary' });
+                        const wsname = wb.SheetNames[0];
+                        const ws = wb.Sheets[wsname];
+                        const data = XLSX.utils.sheet_to_json(ws) as any[];
+                        
+                        // Support headers from user's image
+                        const imported: PartTransformation[] = data.map(row => {
+                          const source = String(row['Linh kiện nguồn (L2)'] || row['SourceID'] || row['Mã nguồn'] || row['Mã L2'] || '').trim();
+                          const target = String(row['Linh kiện đích (L1)'] || row['TargetID'] || row['Mã đích'] || row['Mã L1'] || '').trim();
+                          let stageStr = String(row['Công đoạn áp dụng'] || row['StageID'] || row['Công đoạn'] || 'PAINTING').trim().toUpperCase();
+                          const applicableModel = row['Model áp dụng'] ? String(row['Model áp dụng']).trim() : undefined;
+                          
+                          // Map Vietnamese stage names to IDs
+                          let stageId: StageId = 'PAINTING';
+                          if (stageStr.includes('SƠN')) stageId = 'PAINTING';
+                          else if (stageStr.includes('CHẤN') || stageStr.includes('DẬP')) stageId = 'BENDING';
+                          else if (stageStr.includes('HÀN')) stageId = 'WELDING';
+                          else if (stageStr.includes('LASER') || stageStr.includes('CẮT')) stageId = 'LASER';
+                          else if (stageStr.includes('LẮP') || stageStr.includes('GÓI') || stageStr.includes('DCLR')) stageId = 'DCLR';
+                          else {
+                            const found = STAGES.find(s => s.id === stageStr || s.name.toUpperCase() === stageStr);
+                            if (found) stageId = found.id;
+                          }
+
+                          let finalSource = source;
+                          let finalTarget = target;
+                          const normSource = source.toUpperCase().normalize('NFC').trim();
+                          const normTarget = target.toUpperCase().normalize('NFC').trim();
+
+                          const ptSrc = parts.find(p => p.id.toUpperCase().normalize('NFC').trim() === normSource || p.name.toUpperCase().normalize('NFC').trim() === normSource);
+                          if (ptSrc) finalSource = ptSrc.id;
+
+                          const ptTgt = parts.find(p => p.id.toUpperCase().normalize('NFC').trim() === normTarget || p.name.toUpperCase().normalize('NFC').trim() === normTarget || 
+                                           (p.id.length > 5 && normTarget.replace(/\s+/g, '').includes(p.id.toUpperCase().normalize('NFC').replace(/\s+/g, ''))));
+                          if (ptTgt) finalTarget = ptTgt.id;
+
+                          return {
+                            sourcePartId: finalSource, // Keep case but will handle insensitively in storage
+                            targetPartId: finalTarget,
+                            targetStageId: stageId,
+                            applicableModel: applicableModel
+                          };
+                        }).filter(b => b.sourcePartId && b.targetPartId);
+
+                        if (imported.length === 0) {
+                          alert('Không tìm thấy dữ liệu hợp lệ. Cần các cột: Linh kiện nguồn (L2), Linh kiện đích (L1)');
+                        } else {
+                          storageService.saveTransformations(imported);
+                          alert(`Đã nhập thành công ${imported.length} quy tắc chuyển đổi!`);
+                          onPartsChange(); // Trigger refresh
+                        }
+                      } catch (err) {
+                        alert('Lỗi khi đọc file.');
+                      } finally {
+                        setIsImportingTransformations(false);
+                        if (e.target) e.target.value = '';
+                      }
+                    };
+                    reader.readAsBinaryString(file);
+                  }} />
+                </label>
+              </div>
+            </div>
+
+            <div className="bg-white border border-gray-200 rounded-2xl overflow-hidden">
+               <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="bg-gray-50 border-b border-gray-200">
+                    <th className="p-6 text-xs font-bold uppercase opacity-50">Linh kiện Nguồn (Gốc)</th>
+                    <th className="p-6 text-xs font-bold uppercase opacity-50">Model áp dụng</th>
+                    <th className="p-6 text-xs font-bold uppercase opacity-50 text-center">
+                      <ArrowRight size={16} className="mx-auto" />
+                    </th>
+                    <th className="p-6 text-xs font-bold uppercase opacity-50">Tên mới (Đích)</th>
+                    <th className="p-6 text-xs font-bold uppercase opacity-50">Công đoạn Đích</th>
+                    <th className="p-6 text-xs font-bold uppercase opacity-50 text-right">Thao tác</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {storageService.getTransformations().length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="p-20 text-center text-gray-400 italic">Chưa có quy tắc chuyển đổi nào.</td>
+                    </tr>
+                  ) : (
+                    storageService.getTransformations().map((t, i) => {
+                      const matchSource = parts.find(p => p.id.toUpperCase() === t.sourcePartId.toUpperCase() || p.name.toUpperCase() === t.sourcePartId.toUpperCase());
+                      const matchTarget = parts.find(p => p.id.toUpperCase() === t.targetPartId.toUpperCase() || p.name.toUpperCase() === t.targetPartId.toUpperCase());
+                      return (
+                      <tr key={i} className="border-b border-gray-100 hover:bg-gray-50 transition-colors">
+                        <td className="p-6">
+                           <div className="font-bold">{matchSource?.name || t.sourcePartId}</div>
+                           <div className="text-xs font-mono opacity-50">{matchSource?.id || t.sourcePartId}</div>
+                        </td>
+                        <td className="p-6 font-mono text-sm text-center">
+                          {t.applicableModel ? (
+                            <span className="bg-purple-100 text-purple-700 px-2 py-1 rounded line-clamp-1">{t.applicableModel}</span>
+                          ) : (
+                            <span className="text-gray-400 italic">Tất cả</span>
+                          )}
+                        </td>
+                        <td className="p-6 text-center text-blue-600">
+                           <ArrowRight size={20} className="mx-auto" />
+                        </td>
+                        <td className="p-6">
+                           <div className="font-bold">{matchTarget?.name || t.targetPartId}</div>
+                           <div className="text-xs font-mono opacity-50">{matchTarget?.id || t.targetPartId}</div>
+                        </td>
+                        <td className="p-6">
+                           <span className="px-3 py-1 bg-blue-100 text-blue-700 rounded-full text-[10px] font-bold uppercase">
+                             {STAGES.find(s => s.id === t.targetStageId)?.name || t.targetStageId}
+                           </span>
+                        </td>
+                        <td className="p-6 text-right">
+                           <button 
+                             onClick={() => {
+                               const current = storageService.getTransformations();
+                               current.splice(i, 1);
+                               storageService.saveTransformations(current);
+                               onPartsChange();
+                             }}
+                             className="p-3 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                           >
+                             <Trash2 size={20} />
+                           </button>
+                        </td>
+                      </tr>
+                    )})
+                  )}
+                </tbody>
+              </table>
+            </div>
+            
+            <div className="p-6 bg-cyan-50 rounded-xl border border-cyan-100 flex gap-4 items-start">
+              <AlertCircle size={20} className="text-cyan-600 mt-1" />
+              <div className="text-sm text-cyan-800 space-y-2">
+                <p className="font-bold">Hướng dẫn cài đặt chuyển đổi:</p>
+                <p>Quy tắc này sẽ tự động thay đổi mã linh kiện được ghi nhận vào kho IN của công đoạn chỉ định. 
+                   Ví dụ: Bạn muốn linh kiện L2 (đã chấn xong) khi vào kho Sơn sẽ được tính là linh kiện L1.</p>
+                <p className="text-xs opacity-70 italic">* Khi quét nhãn QR mã nguồn, hệ thống sẽ tự nhận diện và cộng tồn kho cho mã đích.</p>
+              </div>
+            </div>
+          </div>
         ) : activeSettingsTab === 'parts' ? (
           <>
             <div className="p-8 border-b border-gray-100 flex justify-between items-center bg-gray-50/50">
@@ -4060,14 +7112,19 @@ function SettingsView({ parts, onPartsChange, labelSettings, onLabelSettingsChan
                       <td className="p-6">
                         <div className="text-base font-medium">{part.name}</div>
                         <div className="flex gap-2 mt-1">
+                          {part.skipLaser && <span className="px-1.5 py-0.5 bg-yellow-50 text-yellow-600 text-[9px] font-bold rounded border border-yellow-100">MIỄN LASER</span>}
                           {part.skipBending && <span className="px-1.5 py-0.5 bg-red-50 text-red-600 text-[9px] font-bold rounded border border-red-100">MIỄN CHẤN</span>}
                           {part.skipWelding && <span className="px-1.5 py-0.5 bg-orange-50 text-orange-600 text-[9px] font-bold rounded border border-orange-100">MIỄN HÀN</span>}
+                          {part.skipPainting && <span className="px-1.5 py-0.5 bg-gray-100 text-gray-600 text-[9px] font-bold rounded border border-gray-200">MIỄN SƠN</span>}
+                          {part.hasPaintingPO && <span className="px-1.5 py-0.5 bg-blue-600 text-white text-[9px] font-bold rounded shadow-sm">PAINT PO</span>}
                         </div>
                       </td>
                       <td className="p-6">
                         <div className="flex flex-col gap-1 text-[10px] uppercase font-bold text-gray-400">
+                          <span className={cn(part.skipLaser ? "line-through opacity-30" : "text-blue-600")}>Laser</span>
                           <span className={cn(part.skipBending ? "line-through opacity-30" : "text-blue-600")}>Chấn</span>
                           <span className={cn(part.skipWelding ? "line-through opacity-30" : "text-blue-600")}>Hàn</span>
+                          <span className={cn(part.skipPainting ? "line-through opacity-30" : "text-blue-600")}>Sơn</span>
                         </div>
                       </td>
                       <td className="p-6 text-base text-gray-500">{part.unit}</td>
@@ -4103,7 +7160,7 @@ function SettingsView({ parts, onPartsChange, labelSettings, onLabelSettingsChan
             <div className="p-8 border-b border-gray-100 flex justify-between items-center bg-gray-50/50">
               <div className="flex flex-col">
                 <h2 className="font-bold text-2xl tracking-tight">Định mức sản xuất (KG)</h2>
-                <p className="text-xs text-gray-400">Cột yêu cầu: ParentID, ChildID, ComponentWeight, ScrapWeight</p>
+                <p className="text-xs text-gray-400">Cột yêu cầu: Mã linh kiện, Mã linh kiện tôn, Khối lượng (Kg)</p>
               </div>
               <label className={cn(
                 "flex items-center gap-3 px-6 py-3 bg-blue-600 text-white rounded-lg text-sm font-bold uppercase tracking-widest cursor-pointer hover:bg-blue-700 transition-all",
@@ -4124,8 +7181,8 @@ function SettingsView({ parts, onPartsChange, labelSettings, onLabelSettingsChan
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="bg-gray-50/50 border-b border-gray-100">
-                    <th className="p-6 pl-10 text-xs font-mono uppercase opacity-50">Mã Cha (L3)</th>
-                    <th className="p-6 text-xs font-mono uppercase opacity-50">Mã Con (L2)</th>
+                    <th className="p-6 pl-10 text-xs font-mono uppercase opacity-50">Mã linh kiện tôn</th>
+                    <th className="p-6 text-xs font-mono uppercase opacity-50">Mã linh kiện</th>
                     <th className="p-6 text-xs font-mono uppercase opacity-50">KL Linh kiện (kg)</th>
                     <th className="p-6 text-xs font-mono uppercase opacity-50">KL Phế (kg)</th>
                     <th className="p-6 text-xs font-mono uppercase opacity-50">Tổng (kg)</th>
@@ -4137,8 +7194,8 @@ function SettingsView({ parts, onPartsChange, labelSettings, onLabelSettingsChan
                     <tr key={idx} className="hover:bg-gray-50/30 transition-colors">
                       <td className="p-6 pl-10 font-mono text-base">{bom.parentPartId}</td>
                       <td className="p-6 font-mono text-base">{bom.childPartId}</td>
-                      <td className="p-6 font-mono text-base font-bold text-blue-600">{bom.componentWeight}</td>
-                      <td className="p-6 font-mono text-base font-bold text-orange-600">{bom.scrapWeight}</td>
+                      <td className="p-6 font-mono text-base font-bold text-blue-600">{bom.componentWeight.toFixed(4)}</td>
+                      <td className="p-6 font-mono text-base font-bold text-orange-600">{bom.scrapWeight.toFixed(4)}</td>
                       <td className="p-6 font-mono text-base font-bold">{(bom.componentWeight + bom.scrapWeight).toFixed(4)}</td>
                       <td className="p-6 pr-10 text-right">
                         <button 
@@ -4203,18 +7260,26 @@ function NormsView({ parts, onNormsChange }: { parts: Part[], onNormsChange: () 
               nestingId: String(row['NestingID'] || row['Mã tổ hợp'] || row['Mã bàn'] || row['ID Tổ hợp'] || row['Mã tấm'] || row['Mã phôi'] || row['Mã bàn (Nesting ID)'] || '').trim(),
               partId: finalPartId,
               qtyPerSheet: parseFloat(row['QtyPerSheet'] || row['Số lượng linh kiện/tấm'] || row['Số lượng/tấm'] || row['SL/Tấm'] || row['Số lượng'] || row['SL'] || row['Số lượng / Tấm'] || '0'),
-              secondsPerUnit: parseFloat(row['Seconds'] || row['Giây'] || row['Thời gian'] || row['Định mức'] || row['Thời gian cắt/LK'] || row['Thời gian / LK (Giây)'] || '0')
+              secondsPerSheet: parseFloat(row['Tổng thời gian'] || row['Thời gian 1 bàn'] || row['Thời gian 1 tấm'] || row['Giây'] || row['Thời gian'] || row['Định mức'] || row['Thời gian cắt (Giây)'] || '0'),
+              applicableModel: row['Model áp dụng'] || row['Model'] || row['ApplicableModel'] ? String(row['Model áp dụng'] || row['Model'] || row['ApplicableModel']).trim() : undefined
             };
           }).filter(n => n.nestingId && n.partId && n.qtyPerSheet > 0);
 
           if (rawImported.length === 0) {
-            alert('Không tìm thấy dữ liệu hợp lệ. Cần các cột: Mã bàn (Nesting ID), Linh kiện kết hợp, Số lượng / Tấm, Thời gian / LK (Giây)');
+            alert('Không tìm thấy dữ liệu hợp lệ. Cần các cột: Mã bàn (Nesting ID), Linh kiện kết hợp, Số lượng / Tấm, Thời gian 1 tấm, Model áp dụng');
           } else {
-            // Group by NestingID to calculate total seconds per sheet
+            // Group by NestingID to find the max/defined seconds per sheet (since it could be written on only one row or duplicated)
             const nestingTotals = new Map<string, number>();
+            // Also map models if multiple rows have it
+            const nestingModels = new Map<string, string>();
+            
             rawImported.forEach(row => {
-              const current = nestingTotals.get(row.nestingId) || 0;
-              nestingTotals.set(row.nestingId, current + (row.secondsPerUnit * row.qtyPerSheet));
+              if (row.secondsPerSheet > 0) {
+                nestingTotals.set(row.nestingId, row.secondsPerSheet);
+              }
+              if (row.applicableModel) {
+                nestingModels.set(row.nestingId, row.applicableModel);
+              }
             });
 
             // Final mapping to LaserNesting type
@@ -4222,8 +7287,9 @@ function NormsView({ parts, onNormsChange }: { parts: Part[], onNormsChange: () 
               nestingId: row.nestingId,
               partId: row.partId,
               qtyPerSheet: row.qtyPerSheet,
-              secondsPerUnit: row.secondsPerUnit,
-              secondsPerSheet: nestingTotals.get(row.nestingId) || 0
+              secondsPerUnit: 0, // No longer used for total time calculation
+              secondsPerSheet: nestingTotals.get(row.nestingId) || row.secondsPerSheet || 0,
+              applicableModel: row.applicableModel || nestingModels.get(row.nestingId)
             }));
 
             storageService.saveLaserNesting(imported);
@@ -4350,20 +7416,28 @@ function NormsView({ parts, onNormsChange }: { parts: Part[], onNormsChange: () 
               <thead>
                 <tr className="bg-gray-50/50 border-b border-gray-100">
                   <th className="p-8 pl-12 text-sm font-mono uppercase opacity-80">Mã bàn (Nesting ID)</th>
+                  <th className="p-8 text-sm font-mono uppercase opacity-80">Model áp dụng</th>
                   <th className="p-8 text-sm font-mono uppercase opacity-80">Linh kiện kết hợp</th>
                   <th className="p-8 text-sm font-mono uppercase opacity-80 text-center">Số lượng / Tấm</th>
-                  <th className="p-8 text-sm font-mono uppercase opacity-80 text-center">Thời gian / LK (Giây)</th>
-                  <th className="p-8 text-sm font-mono uppercase opacity-80 text-center bg-orange-50/50">Tổng s/Tấm</th>
+                  <th className="p-8 text-sm font-mono uppercase opacity-80 text-center bg-orange-50/50">Thời gian 1 bàn (Giây)</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
                 {Array.from(new Set(nesting.map(n => n.nestingId))).map((nestId, idx) => {
                   const items = nesting.filter(n => n.nestingId === nestId);
                   const totalSeconds = items[0]?.secondsPerSheet || 0;
+                  const maxModel = items[0]?.applicableModel;
 
                   return (
                     <tr key={idx} className="hover:bg-gray-50/30 transition-colors">
                       <td className="p-8 pl-12 font-mono text-lg font-bold text-orange-600">{nestId}</td>
+                      <td className="p-8 font-mono text-sm opacity-80 whitespace-nowrap">
+                        {maxModel ? (
+                          <span className="bg-orange-100 text-orange-700 px-3 py-1 rounded-full font-bold">{maxModel}</span>
+                        ) : (
+                          <span className="opacity-40 italic">Tất cả Model</span>
+                        )}
+                      </td>
                       <td className="p-8">
                         <div className="flex flex-wrap gap-2">
                           {items.map((it, i) => (
@@ -4382,15 +7456,6 @@ function NormsView({ parts, onNormsChange }: { parts: Part[], onNormsChange: () 
                           ))}
                         </div>
                       </td>
-                      <td className="p-8 text-center text-gray-500 font-mono">
-                        <div className="flex flex-col gap-1 items-center">
-                          {items.map((it, i) => (
-                            <span key={i} className="text-sm">
-                              {it.secondsPerUnit}s
-                            </span>
-                          ))}
-                        </div>
-                      </td>
                       <td className="p-8 text-center bg-orange-50/20">
                         <span className="font-mono text-2xl font-black text-orange-600">{totalSeconds}</span>
                         <span className="ml-2 text-xs font-bold uppercase opacity-40 text-orange-900">giây</span>
@@ -4400,7 +7465,7 @@ function NormsView({ parts, onNormsChange }: { parts: Part[], onNormsChange: () 
                 })}
                 {nesting.length === 0 && (
                   <tr>
-                    <td colSpan={4} className="p-24 text-center text-gray-400 italic">
+                    <td colSpan={5} className="p-24 text-center text-gray-400 italic">
                       <div className="flex flex-col items-center">
                         <Layers size={64} className="opacity-10 mb-6" />
                         <p className="text-xl">Chưa có định mức tổ hợp linh kiện Laser.</p>
@@ -4525,7 +7590,12 @@ function HistoryView({ transactions, parts }: HistoryProps) {
                     </span>
                   </td>
                   <td className="p-6 font-bold text-lg">
-                    {getProcessValue(tx.partId, parts.find(p => p.id === tx.partId), tx.stageId, tx.type === 'STAGE_OUT' ? 'OUT' : 'IN')}
+                    <div className="flex items-center gap-2">
+                       {getProcessValue(tx.partId, parts.find(p => p.id === tx.partId), tx.stageId, tx.type === 'STAGE_OUT' ? 'OUT' : 'IN')}
+                       {tx.originalPartId && (
+                         <span className="text-[10px] bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full uppercase">Từ {tx.originalPartId}</span>
+                       )}
+                    </div>
                     <span className="block text-sm font-normal opacity-80">
                       {getProcessValue(parts.find(p => p.id === tx.partId)?.name, parts.find(p => p.id === tx.partId), tx.stageId, tx.type === 'STAGE_OUT' ? 'OUT' : 'IN')}
                     </span>
@@ -4555,7 +7625,7 @@ function WorkingHoursView() {
 
   const handleSave = () => {
     storageService.saveShiftConfigs(configs);
-    alert('Đã lưu cài đặt ca làm việc & nghỉ ngơi!');
+    alert('Đã lưu cài đặt ca làm việc & nghỉ ngơi! \nHệ thống sẽ tự động áp dụng nguồn lực ngoại lệ khi tính toán kế hoạch sản xuất cho PO mới.');
   };
 
   const handleReset = () => {
@@ -4632,6 +7702,69 @@ function WorkingHoursView() {
     }));
   };
 
+  const addOverride = (stageId: StageId) => {
+    setConfigs(prev => prev.map(c => {
+      if (c.stageId === stageId) {
+        return { ...c, workerOverrides: [...(c.workerOverrides || []), { modelId: 'Gói khung tủ', workerCount: 2 }] };
+      }
+      return c;
+    }));
+  };
+
+  const updateOverride = (stageId: StageId, idx: number, key: 'modelId'|'workerCount', val: string|number) => {
+    setConfigs(prev => prev.map(c => {
+      if (c.stageId === stageId) {
+        const newOverrides = [...(c.workerOverrides || [])];
+        newOverrides[idx] = { ...newOverrides[idx], [key]: val };
+        return { ...c, workerOverrides: newOverrides };
+      }
+      return c;
+    }));
+  };
+
+  const removeOverride = (stageId: StageId, idx: number) => {
+    setConfigs(prev => prev.map(c => {
+      if (c.stageId === stageId) {
+        return { ...c, workerOverrides: (c.workerOverrides || []).filter((_, i) => i !== idx) };
+      }
+      return c;
+    }));
+  };
+
+  const handleImportOverrides = (e: React.ChangeEvent<HTMLInputElement>, stageId: StageId) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      const bstr = evt.target?.result;
+      const wb = XLSX.read(bstr, { type: 'binary' });
+      const wsname = wb.SheetNames[0];
+      const ws = wb.Sheets[wsname];
+      const data = XLSX.utils.sheet_to_json(ws) as any[];
+
+      const imported = data.map(row => ({
+        modelId: String(row['Tên linh kiện'] || row['Model'] || row['Mã linh kiện'] || row['ModelId'] || '').trim(),
+        workerCount: parseInt(row['Định mức ngoại lệ'] || row['Số lượng nhân sự'] || row['WorkerCount'] || '1')
+      })).filter(o => o.modelId && o.workerCount > 0);
+
+      if (imported.length > 0) {
+        setConfigs(prev => prev.map(c => {
+          if (c.stageId === stageId) {
+            // Merge or replace? Replacing is cleaner for bulk updates
+            return { ...c, workerOverrides: imported };
+          }
+          return c;
+        }));
+        alert(`Đã nhập thành công ${imported.length} ngoại lệ định mức cho công đoạn ${stageId}!`);
+      } else {
+        alert('Không tìm thấy dữ hiệu hợp lệ. Cần các cột: Tên linh kiện, Định mức ngoại lệ');
+      }
+    };
+    reader.readAsBinaryString(file);
+    e.target.value = ''; // Reset input
+  };
+
   return (
     <motion.div 
       initial={{ opacity: 0, y: 20 }}
@@ -4668,10 +7801,18 @@ function WorkingHoursView() {
           if (!config) return null;
 
           return (
-            <div key={stage.id} className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden border-t-4 border-t-blue-500">
+            <div key={stage.id} className={cn(
+              "bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden border-t-4",
+              stage.id === 'LASER' ? "border-t-orange-500" : 
+              stage.id === 'GLAZING' ? "border-t-indigo-500" :
+              stage.id === 'PAINTING' ? "border-t-pink-500" : "border-t-blue-500"
+            )}>
               <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50/50">
                 <h3 className="text-xl font-bold flex items-center gap-3 italic">
-                  {stage.id === 'LASER' ? <Flame className="text-orange-500" /> : <Monitor className="text-blue-500" />}
+                  {stage.id === 'LASER' && <Flame className="text-orange-500" />}
+                  {stage.id === 'GLAZING' && <Square className="text-indigo-500" />}
+                  {stage.id === 'PAINTING' && <Monitor className="text-pink-500" />}
+                  {(stage.id !== 'LASER' && stage.id !== 'GLAZING' && stage.id !== 'PAINTING') && <Monitor className="text-blue-500" />}
                   {stage.name}
                 </h3>
                 <span className="text-xs font-mono font-bold bg-gray-200 px-2 py-1 rounded">
@@ -4681,25 +7822,97 @@ function WorkingHoursView() {
               
               <div className="p-8 space-y-8">
                 {/* Worker Count */}
-                <div className="flex items-center justify-between bg-blue-50 p-4 rounded-xl border border-blue-100">
-                  <div className="flex items-center gap-3">
-                    <div className="p-2 bg-white rounded-lg shadow-sm">
-                      <Users size={20} className="text-blue-600" />
+                <div className="flex flex-col gap-3 bg-blue-50 p-4 rounded-xl border border-blue-100">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 bg-white rounded-lg shadow-sm">
+                        <Users size={20} className="text-blue-600" />
+                      </div>
+                      <div>
+                        <h4 className="text-sm font-bold text-gray-700">Số lượng nhân sự / nguồn lực</h4>
+                        <p className="text-xs text-gray-500">Mặc định cho công đoạn này</p>
+                      </div>
                     </div>
-                    <div>
-                      <h4 className="text-sm font-bold text-gray-700">Số lượng nhân sự / nguồn lực</h4>
-                      <p className="text-xs text-gray-500">Giúp tăng tốc độ hoàn thành công đoạn</p>
+                    <div className="flex items-center gap-6">
+                      <label className="flex items-center gap-2 cursor-pointer bg-white px-3 py-2 rounded-lg border border-gray-200 shadow-sm hover:border-blue-300 transition-all">
+                        <input
+                          type="checkbox"
+                          checked={config.workOnSunday || false}
+                          onChange={(e) => {
+                            setConfigs(prev => prev.map(c => c.stageId === stage.id ? { ...c, workOnSunday: e.target.checked } : c));
+                          }}
+                          className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                        />
+                        <span className="text-xs font-bold text-gray-700 select-none">LÀM CHỦ NHẬT</span>
+                      </label>
+                      <div className="flex items-center gap-3">
+                        <input 
+                          type="number" 
+                          min="1"
+                          value={config.workerCount || 1}
+                          onChange={(e) => updateWorkerCount(stage.id, parseInt(e.target.value))}
+                          className="w-20 bg-white border border-gray-200 rounded-lg p-2 font-mono text-center font-bold text-blue-600 focus:border-blue-500 outline-none"
+                        />
+                        <span className="text-xs font-bold text-gray-400">NGƯỜI</span>
+                      </div>
                     </div>
                   </div>
-                  <div className="flex items-center gap-3">
-                    <input 
-                      type="number" 
-                      min="1"
-                      value={config.workerCount || 1}
-                      onChange={(e) => updateWorkerCount(stage.id, parseInt(e.target.value))}
-                      className="w-20 bg-white border border-gray-200 rounded-lg p-2 font-mono text-center font-bold text-blue-600 focus:border-blue-500 outline-none"
-                    />
-                    <span className="text-xs font-bold text-gray-400">NGƯỜI</span>
+
+                  {/* Overrides Table */}
+                  <div className="mt-2 border-t border-blue-200 pt-3">
+                    <div className="flex justify-between items-center mb-2">
+                      <h5 className="text-xs font-bold text-blue-700 uppercase">Ngoại lệ theo Model</h5>
+                      <div className="flex gap-2">
+                        <label className="text-xs font-bold bg-white text-blue-600 px-2 py-1 rounded shadow-sm hover:bg-blue-100 transition-colors cursor-pointer border border-blue-200">
+                          <Upload size={12} className="inline mr-1" />
+                          Nhập Excel
+                          <input 
+                            type="file" 
+                            accept=".xlsx, .xls"
+                            className="hidden"
+                            onChange={(e) => handleImportOverrides(e, stage.id)}
+                          />
+                        </label>
+                        <button 
+                          onClick={() => addOverride(stage.id)}
+                          className="text-xs font-bold bg-white text-blue-600 px-2 py-1 rounded shadow-sm hover:bg-blue-100 transition-colors border border-blue-200"
+                        >
+                          + Thêm thủ công
+                        </button>
+                      </div>
+                    </div>
+                    {config.workerOverrides && config.workerOverrides.length > 0 ? (
+                      <div className="space-y-2">
+                        {config.workerOverrides.map((ov, oIdx) => (
+                          <div key={oIdx} className="flex items-center gap-2 bg-white p-2 rounded-lg shadow-sm border border-blue-100">
+                            <input 
+                              type="text"
+                              value={ov.modelId}
+                              onChange={e => updateOverride(stage.id, oIdx, 'modelId', e.target.value)}
+                              placeholder="Tên model (VD: Gói khung tủ)"
+                              className="flex-1 bg-transparent border-none text-sm outline-none px-2 font-bold text-gray-700"
+                            />
+                            <div className="flex items-center gap-2">
+                              <input 
+                                type="number"
+                                min="1"
+                                value={ov.workerCount}
+                                onChange={e => updateOverride(stage.id, oIdx, 'workerCount', parseInt(e.target.value))}
+                                className="w-16 bg-gray-50 border border-gray-200 rounded p-1 font-mono text-center text-sm focus:border-blue-500 outline-none"
+                              />
+                              <button 
+                                onClick={() => removeOverride(stage.id, oIdx)}
+                                className="p-1 text-gray-400 hover:text-red-500 transition-colors"
+                              >
+                                <Trash2 size={16} />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-blue-500/70 italic">Chưa có cài đặt ngoại lệ.</p>
+                    )}
                   </div>
                 </div>
 
@@ -4791,6 +8004,408 @@ function WorkingHoursView() {
           );
         })}
       </div>
+    </motion.div>
+  );
+}
+
+function DefectModal({ data, onClose, onDefectRecorded, inventory }: { data: any, onClose: () => void, onDefectRecorded: () => void, inventory: InventoryItem[] }) {
+  const [qty, setQty] = useState(0);
+  const [reasonId, setReasonId] = useState(DEFECT_REASONS[0].id);
+  const [note, setNote] = useState("");
+  const [selectedPartId, setSelectedPartId] = useState(data.partId || "");
+
+  const allParts = storageService.getParts();
+  
+  // Filter parts if no specific partId is provided but stageId is
+  const availableParts = useMemo(() => {
+    if (data.partId) return allParts;
+    if (!data.stageId) return allParts;
+    
+    const partsWithStock = inventory
+      .filter(i => i.stageId === data.stageId && i.location === 'IN' && i.quantity > 0)
+      .map(i => i.partId);
+      
+    if (partsWithStock.length === 0) return allParts; // Fallback to all if somehow empty
+    
+    return allParts.filter(p => partsWithStock.includes(p.id));
+  }, [allParts, data.partId, data.stageId, inventory]);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const finalPartId = selectedPartId || data.partId;
+    if (!finalPartId) {
+      alert('Vui lòng chọn mã linh kiện');
+      return;
+    }
+    if (qty <= 0) {
+      alert('Vui lòng nhập số lượng lỗi hợp lệ');
+      return;
+    }
+    try {
+      const reasonName = DEFECT_REASONS.find(r => r.id === reasonId)?.name || reasonId;
+      storageService.recordDefect(finalPartId, data.stageId, qty, reasonName, note, data.poId);
+      onDefectRecorded();
+      onClose();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Lỗi');
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200 text-gray-900">
+      <motion.div 
+        initial={{ scale: 0.9, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden border-4 border-red-500/10"
+      >
+        <div className="bg-red-600 p-8 text-white flex justify-between items-center">
+          <div className="flex items-center gap-3">
+            <AlertCircle size={32} />
+            <div>
+              <h3 className="text-2xl font-bold uppercase tracking-tight leading-none mb-1">Khai báo hàng lỗi</h3>
+              <p className="text-xs font-mono opacity-80 uppercase tracking-widest">Defect / NG Record</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-white/20 rounded-full transition-colors"><X size={28} /></button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-8 space-y-6">
+          <div className="p-4 bg-gray-50 rounded-xl border border-gray-100 flex justify-between items-center text-left">
+            <div className="flex-1">
+              <div className="text-xs font-bold text-gray-400 uppercase mb-1">Linh kiện / Stage</div>
+              {data.partId ? (
+                <div className="font-bold text-gray-900">{data.partId}</div>
+              ) : (
+                <div className="w-full">
+                  <SearchableSelect 
+                    options={availableParts.map(p => ({ id: p.id, label: `${p.id} - ${p.name}` }))}
+                    value={selectedPartId}
+                    onChange={setSelectedPartId}
+                    placeholder="Chọn linh kiện..."
+                  />
+                </div>
+              )}
+              <div className="text-xs text-red-600 font-bold uppercase">{STAGES.find(s => s.id === data.stageId)?.name}</div>
+            </div>
+            {data.poId && (
+              <div className="text-right">
+                <div className="text-xs font-bold text-gray-400 uppercase mb-1">Lệnh PO</div>
+                <div className="font-mono font-bold text-gray-700">{data.poId}</div>
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-3">
+            <label className="text-sm font-bold uppercase tracking-widest text-gray-500">1. Số lượng lỗi (NG)</label>
+            <div className="flex gap-4">
+              <button type="button" onClick={() => setQty(Math.max(0, qty - 1))} className="w-16 h-16 rounded-xl border-2 border-gray-100 flex items-center justify-center font-bold text-2xl hover:bg-gray-50 text-gray-900">-</button>
+              <input 
+                type="number" 
+                step="any"
+                autoFocus
+                value={qty || ''} 
+                onChange={(e) => setQty(parseFloat(e.target.value) || 0)}
+                className="flex-1 h-16 text-center border-2 border-gray-900 rounded-xl font-mono font-bold text-2xl outline-none focus:ring-4 ring-red-500/5 text-gray-900"
+                placeholder="0"
+              />
+              <button type="button" onClick={() => setQty(qty + 1)} className="w-16 h-16 rounded-xl border-2 border-gray-100 flex items-center justify-center font-bold text-2xl hover:bg-gray-50 text-gray-900">+</button>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            <label className="text-sm font-bold uppercase tracking-widest text-gray-500">2. Lý do lỗi</label>
+            <select 
+              value={reasonId}
+              onChange={(e) => setReasonId(e.target.value)}
+              className="w-full p-4 rounded-xl border-2 border-gray-100 font-bold text-lg focus:border-red-600 outline-none bg-white text-gray-900"
+            >
+              {DEFECT_REASONS.map(r => (
+                <option key={r.id} value={r.id}>{r.name}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="space-y-3">
+            <label className="text-sm font-bold uppercase tracking-widest text-gray-500">3. Ghi chú thêm (Tùy chọn)</label>
+            <textarea 
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              className="w-full p-4 rounded-xl border-2 border-gray-100 font-medium text-lg focus:border-red-600 outline-none h-24 resize-none text-gray-900 bg-white"
+              placeholder="Mô tả chi tiết tình trạng..."
+            />
+          </div>
+
+          <button 
+            type="submit"
+            className="w-full h-16 bg-red-600 text-white rounded-xl font-black text-xl uppercase shadow-xl hover:bg-red-700 active:scale-95 transition-all flex items-center justify-center gap-3"
+          >
+            <AlertCircle size={24} /> Xác nhận báo lỗi
+          </button>
+        </form>
+      </motion.div>
+    </div>
+  );
+}
+
+function DisposalModal({ data, onClose, onDisposed, setLastTransaction }: { data: any, onClose: () => void, onDisposed: (tx: Transaction) => void, setLastTransaction: (tx: Transaction) => void }) {
+  const [qty, setQty] = useState(data.quantity);
+  const [recordedTx, setRecordedTx] = useState<Transaction | null>(null);
+
+  const handleDispose = () => {
+    try {
+      const tx = storageService.recordDisposal(data.partId, data.stageId, qty);
+      setRecordedTx(tx);
+      onDisposed(tx);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Lỗi khi xuất hủy');
+    }
+  };
+
+  const handlePrint = () => {
+    if (recordedTx) {
+      setLastTransaction(recordedTx);
+      setTimeout(() => {
+        window.print();
+      }, 200);
+    }
+  };
+
+  if (recordedTx) {
+    return (
+      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4 no-print">
+        <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="bg-white rounded-3xl p-8 max-w-md w-full shadow-2xl relative text-gray-900">
+          <button onClick={onClose} className="absolute right-6 top-6 text-gray-400 hover:text-black"><X size={24} /></button>
+          <div className="text-center">
+            <div className="w-20 h-20 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-6">
+              <CheckCircle2 size={40} />
+            </div>
+            <h2 className="text-2xl font-bold mb-2">Đã xuất hủy thành công!</h2>
+            <p className="text-gray-500 mb-8">Vui lòng in mã QR dưới đây để dán lên hàng đi hủy.</p>
+            
+            <div className="bg-gray-50 p-6 rounded-2xl mb-8 border border-gray-100 inline-block mx-auto">
+              <QRCodeSVG value={recordedTx.qrData || ''} size={200} level="H" />
+              <div className="mt-4 font-mono font-bold text-sm uppercase">{recordedTx.id}</div>
+              <div className="text-[10px] text-gray-500 uppercase mt-1 tracking-widest font-bold">NHÃN ĐEM HỦY (DISPOSAL)</div>
+            </div>
+
+            <div className="flex gap-4 line-clamp-1">
+              <button onClick={handlePrint} className="flex-1 bg-blue-600 text-white py-4 rounded-xl font-bold hover:bg-blue-700 shadow-lg shadow-blue-200">
+                IN MÃ HỦY
+              </button>
+              <button onClick={onClose} className="flex-1 bg-gray-100 text-gray-600 py-4 rounded-xl font-bold hover:bg-gray-200">
+                ĐÓNG
+              </button>
+            </div>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+
+  return (
+     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+        <motion.div initial={{ y: 20, opacity: 0 }} animate={{ y: 0, opacity: 1 }} className="bg-white rounded-3xl p-8 max-w-md w-full shadow-2xl relative text-gray-900">
+          <button onClick={onClose} className="absolute right-6 top-6 text-gray-400 hover:text-black"><X size={24} /></button>
+          <h2 className="text-2xl font-bold mb-2 flex items-center gap-3">
+            <Trash2 className="text-red-600" />
+            Xác nhận xuất hủy
+          </h2>
+          <p className="text-gray-500 mb-6 font-medium">Bạn đang thực hiện xuất hủy hàng lỗi khỏi kho. Hành động này không thể hoàn tác.</p>
+          
+          <div className="bg-red-50 p-6 rounded-2xl border border-red-100 mb-8">
+             <div className="text-xs font-bold text-red-400 uppercase tracking-widest mb-1">Chi tiết hàng lỗi</div>
+             <div className="text-lg font-bold text-red-900">{data.partId}</div>
+             <div className="text-sm font-medium text-red-700 opacity-70 mb-4">{data.partName}</div>
+             <div className="flex justify-between items-center bg-white/50 p-3 rounded-lg border border-red-100">
+                <span className="text-xs font-bold text-red-900">Tại kho:</span>
+                <span className="text-sm font-bold text-red-900 bg-red-100 px-2 py-0.5 rounded italic">{data.stageName} (DEFECT)</span>
+             </div>
+          </div>
+
+          <div className="space-y-4 mb-8">
+            <label className="text-xs font-bold text-gray-500 uppercase tracking-widest">Số lượng xuất hủy ({data.unit})</label>
+            <div className="flex items-center gap-4">
+              <input 
+                type="number"
+                value={qty}
+                onChange={(e) => setQty(parseFloat(e.target.value) || 0)}
+                max={data.quantity}
+                className="flex-1 p-5 rounded-2xl border-2 border-gray-100 font-bold text-2xl focus:border-red-600 outline-none text-center"
+              />
+            </div>
+            <p className="text-[10px] text-gray-400 italic font-medium">* Tồn kho lỗi hiện có: {data.quantity} {data.unit}</p>
+          </div>
+
+          <div className="flex gap-4">
+            <button onClick={handleDispose} className="flex-1 bg-red-600 text-white py-5 rounded-2xl font-bold uppercase tracking-widest hover:bg-red-700 shadow-xl shadow-red-200 transition-all active:scale-95">
+              XUẤT HỦY & IN QR
+            </button>
+          </div>
+        </motion.div>
+     </div>
+  );
+}
+
+function DefectView({ parts, transactions, inventory, refreshData, setLastTransaction }: any) {
+  const [searchTerm, setSearchTerm] = useState("");
+  const [disposalModal, setDisposalModal] = useState<any>(null);
+
+  const defectItems = inventory.filter((i: any) => i.location === 'DEFECT' && i.quantity > 0);
+  const combinedTxs = transactions.filter((t: any) => t.type === 'DEFECT' || t.type === 'DISPOSAL')
+    .sort((a: any, b: any) => b.timestamp - a.timestamp);
+
+  const filteredItems = defectItems.filter((i: any) => i.partId.toLowerCase().includes(searchTerm.toLowerCase()));
+  const filteredTxs = combinedTxs.filter((tx: any) => 
+    tx.partId.toLowerCase().includes(searchTerm.toLowerCase()) || 
+    (tx.defectReason || "").toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
+  return (
+    <motion.div 
+      initial={{ opacity: 0, x: 20 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: -20 }}
+      className="space-y-8"
+    >
+      <div className="bg-white p-8 rounded-3xl border border-gray-200 shadow-sm text-gray-900">
+        <div className="flex items-center gap-4 mb-8">
+          <div className="w-12 h-12 bg-red-100 text-red-600 rounded-2xl flex items-center justify-center">
+            <AlertCircle size={24} />
+          </div>
+          <div className="text-left">
+            <h2 className="text-2xl font-bold tracking-tight">Tồn kho hàng lỗi hiện tại</h2>
+            <p className="text-xs text-gray-400 font-bold uppercase tracking-widest">Danh sách các linh kiện đang chờ xử lý hủy</p>
+          </div>
+        </div>
+
+        {defectItems.length > 0 ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {filteredItems.map((item: any) => {
+              const part = parts.find((p: any) => p.id === item.partId);
+              return (
+                <div key={`${item.partId}-${item.stageId}`} className="p-6 rounded-2xl bg-gray-50 border border-gray-100 flex flex-col justify-between text-left">
+                  <div>
+                    <div className="flex justify-between items-start mb-4">
+                      <span className="px-2 py-1 bg-white text-gray-500 text-[10px] font-bold rounded border border-gray-200 uppercase">
+                        {STAGES.find(s => s.id === item.stageId)?.name}
+                      </span>
+                      <span className="font-mono text-2xl font-bold text-red-600">{item.quantity}</span>
+                    </div>
+                    <h3 className="font-bold text-gray-900 mb-1">{item.partId}</h3>
+                    <p className="text-xs text-gray-500 uppercase truncate mb-4">{part?.name}</p>
+                  </div>
+                  <button 
+                    onClick={() => setDisposalModal({ 
+                      partId: item.partId, 
+                      partName: part?.name,
+                      stageId: item.stageId,
+                      stageName: STAGES.find(s => s.id === item.stageId)?.name,
+                      quantity: item.quantity,
+                      unit: part?.unit
+                    })}
+                    className="w-full bg-red-600 text-white py-3 rounded-xl font-bold uppercase tracking-widest text-xs hover:bg-red-700 transition-all flex items-center justify-center gap-2"
+                  >
+                    <Trash2 size={16} />
+                    Xuất hủy & In QR
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="p-12 text-center bg-gray-50 rounded-2xl border border-dashed border-gray-200">
+            <p className="text-gray-400 italic">Không có hàng lỗi tồn kho.</p>
+          </div>
+        )}
+      </div>
+
+      <div className="bg-white p-8 rounded-3xl border border-gray-200 shadow-sm text-gray-900">
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 mb-8">
+          <div className="text-left">
+            <h2 className="text-2xl font-bold tracking-tight">Cập nhật & Nhật ký (NG Log)</h2>
+            <p className="text-xs text-gray-400 font-bold uppercase tracking-widest">Lịch sử ghi nhận và xuất hủy hàng lỗi</p>
+          </div>
+          <div className="relative w-full md:w-64">
+            <input 
+              type="text"
+              placeholder="Tìm theo mã LK, Lý do..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full pl-10 pr-4 py-3 rounded-xl border border-gray-200 focus:border-blue-600 outline-none"
+            />
+            <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+          </div>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="border-b-2 border-gray-100 bg-gray-50/50">
+                <th className="p-4 text-xs font-mono uppercase opacity-60">Thời gian</th>
+                <th className="p-4 text-xs font-mono uppercase opacity-60">Loại</th>
+                <th className="p-4 text-xs font-mono uppercase opacity-60">Linh kiện</th>
+                <th className="p-4 text-xs font-mono uppercase opacity-60">Công đoạn</th>
+                <th className="p-4 text-xs font-mono uppercase opacity-60 text-right">Số lượng</th>
+                <th className="p-4 text-xs font-mono uppercase opacity-60">Chi tiết</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-50 text-sm">
+              {filteredTxs.map((tx: any) => (
+                <tr key={tx.id} className="hover:bg-gray-50/80 transition-colors">
+                  <td className="p-4 font-mono text-xs opacity-60">{format(tx.timestamp, 'dd/MM HH:mm')}</td>
+                  <td className="p-4">
+                    {tx.type === 'DEFECT' ? (
+                      <span className="px-2 py-1 bg-red-100 text-red-700 text-[10px] font-bold rounded uppercase whitespace-nowrap">Ghi nhận lỗi</span>
+                    ) : (
+                      <span className="px-2 py-1 bg-gray-600 text-white text-[10px] font-bold rounded uppercase whitespace-nowrap">Xuất hủy</span>
+                    )}
+                  </td>
+                  <td className="p-4 text-left">
+                    <div className="font-bold">{tx.partId}</div>
+                    <div className="text-[10px] text-gray-500 uppercase truncate max-w-[150px]">{parts.find((p: any) => p.id === tx.partId)?.name}</div>
+                  </td>
+                  <td className="p-4">
+                    <span className="px-2 py-1 bg-gray-100 text-gray-600 text-[10px] font-bold rounded uppercase">
+                      {STAGES.find(s => s.id === tx.stageId)?.name}
+                    </span>
+                  </td>
+                  <td className={`p-4 font-mono font-bold text-lg text-right ${tx.type === 'DEFECT' ? 'text-red-600' : 'text-gray-900'}`}>
+                    {tx.type === 'DEFECT' ? '+' : '-'}{tx.quantity}
+                  </td>
+                  <td className="p-4 text-left">
+                    {tx.type === 'DEFECT' ? (
+                      <>
+                        <div className="font-bold text-gray-900">{tx.defectReason}</div>
+                        {tx.defectCategory && <div className="text-[10px] text-gray-500 italic mt-0.5">Note: {tx.defectCategory}</div>}
+                      </>
+                    ) : (
+                      <div className="text-gray-500 font-medium">Xuất disposal (QR: {tx.id})</div>
+                    )}
+                  </td>
+                </tr>
+              ))}
+              {filteredTxs.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="p-20 text-center text-gray-400 italic">
+                    Chưa có nhật ký nào.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {disposalModal && (
+        <DisposalModal 
+          data={disposalModal} 
+          setLastTransaction={setLastTransaction}
+          onClose={() => setDisposalModal(null)} 
+          onDisposed={(tx) => {
+            refreshData();
+          }} 
+        />
+      )}
     </motion.div>
   );
 }
