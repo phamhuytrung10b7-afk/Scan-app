@@ -725,7 +725,7 @@ export const storageService = {
   applyBOMDeduction(partId: string, stageId: StageId, quantity: number, poId?: string) {
     const parts = this.getParts();
     // Strip suffixes added by display logic (e.g., " - CD", " - H") to ensure BOM lookups match the original part ID
-    const cleanId = partId.split(' - ')[0];
+    const cleanId = partId.startsWith('GLZ-OUT-') ? partId : partId.split(' - ')[0];
 
     let currentModelId: string | undefined;
     if (poId) {
@@ -847,8 +847,8 @@ export const storageService = {
     return null;
   },
 
-  recordStageOut(partId: string, stageId: StageId, quantity: number, sourceLocation: 'IN' | 'OUT' = 'IN', targetStageId?: StageId, poId?: string) {
-    const cleanId = partId.split(' - ')[0].trim().toUpperCase();
+  recordStageOut(partId: string, stageId: StageId, quantity: number, sourceLocation: 'IN' | 'OUT' = 'IN', targetStageId?: StageId, poId?: string, force?: boolean) {
+    const cleanId = partId.startsWith('GLZ-OUT-') ? partId.trim().toUpperCase() : partId.split(' - ')[0].trim().toUpperCase();
     const pos = this.getProductionOrders();
     const poIndex = poId 
       ? pos.findIndex(p => p.id === poId)
@@ -862,6 +862,16 @@ export const storageService = {
     // Validation: Check if source location has enough quantity
     const inventory = this.getInventory();
     const effectiveId = this.getEffectivePartId(cleanId, stageId, linkedPoId);
+    
+    // 0. Update Production Order progress
+    const isPaintingExempt = stageId === 'PAINTING' && sourceLocation === 'IN';
+    if (sourceLocation === 'IN' && poIndex !== -1) {
+      const po = pos[poIndex];
+      // Validate PO limit before modifying state
+      if (po.producedQuantity + quantity > po.targetQuantity && !isPaintingExempt && !force) {
+        throw new Error(`OVER_PO:Số lượng sản xuất (${po.producedQuantity + quantity}) sẽ vượt quá mục tiêu PO (${po.targetQuantity}) cho ${cleanId} tại ${stageId}. Bạn có chắc chắn muốn báo cáo hoàn thành thêm?`);
+      }
+    }
     
     const partsInCatalog = this.getParts();
     const selectedPartInCatalog = partsInCatalog.find(p => p.id === cleanId || p.name === cleanId);
@@ -887,12 +897,8 @@ export const storageService = {
     }
 
     // 0. Update Production Order progress
-    const isPaintingExempt = stageId === 'PAINTING' && sourceLocation === 'IN';
     if (sourceLocation === 'IN' && poIndex !== -1) {
       const po = pos[poIndex];
-      if (po.producedQuantity + quantity > po.targetQuantity && !isPaintingExempt) {
-        throw new Error(`Lỗi: Số lượng sản xuất (${po.producedQuantity + quantity}) vượt quá mục tiêu PO (${po.targetQuantity}) cho ${cleanId} tại ${stageId}`);
-      }
       po.producedQuantity += quantity;
       const isProduced = po.producedQuantity >= po.targetQuantity;
       const isExported = (po.exportedQuantity || 0) >= po.targetQuantity;
@@ -1026,7 +1032,7 @@ export const storageService = {
 
     const quantity = parseFloat(quantityStr);
 
-    let partId = idOrPo.split(' - ')[0];
+    let partId = idOrPo.startsWith('GLZ-OUT-') ? idOrPo : idOrPo.split(' - ')[0];
     let linkedPoId: string | undefined;
 
     // Recognize PO IDs (PO- or REPAIR-)
@@ -1064,7 +1070,7 @@ export const storageService = {
       throw new Error(`Lỗi: Nhãn này được chỉ định cho công đoạn ${targetStageName}. Bạn đang ở công đoạn ${STAGES.find(s => s.id === currentStageId)?.name}.`);
     }
 
-    if (!linkedPoId) {
+    if (!linkedPoId && !partId.startsWith('GLZ-OUT-')) {
       throw new Error('Lỗi: Nhãn QR này không chứa thông tin Lệnh sản xuất (PO). Không thể nhập kho.');
     }
 
@@ -1105,8 +1111,8 @@ export const storageService = {
     return newTransaction;
   },
 
-  recordManualInbound(partId: string, stageId: StageId, location: 'IN' | 'OUT', quantity: number, poId?: string) {
-    const cleanId = partId.split(' - ')[0].trim().toUpperCase();
+  recordManualInbound(partId: string, stageId: StageId, location: 'IN' | 'OUT', quantity: number, poId?: string, force?: boolean) {
+    const cleanId = partId.startsWith('GLZ-OUT-') ? partId.trim().toUpperCase() : partId.split(' - ')[0].trim().toUpperCase();
     let linkedPoId = poId;
 
     // Check for required PO
@@ -1119,14 +1125,19 @@ export const storageService = {
 
     // Apply BOM logic if entering into OUT (Production result)
     if (location === 'OUT') {
+      // Validate PO limit BEFORE deducting BOM and saving anything
+      if (poIndex !== -1) {
+        const po = pos[poIndex];
+        if (po.producedQuantity + quantity > po.targetQuantity && !force) {
+          throw new Error(`OVER_PO:Số lượng thêm vào (${po.producedQuantity + quantity}) sẽ vượt quá mục tiêu PO (${po.targetQuantity}) cho ${cleanId} tại ${stageId}. Bạn có chắc chắn vẫn muốn thêm và tính tiêu hao?`);
+        }
+      }
+
       this.applyBOMDeduction(cleanId, stageId, quantity, currentPoId);
 
       // Update PO progress
       if (poIndex !== -1) {
         const po = pos[poIndex];
-        if (po.producedQuantity + quantity > po.targetQuantity) {
-          throw new Error(`Lỗi: Số lượng sản xuất (${po.producedQuantity + quantity}) vượt quá mục tiêu PO (${po.targetQuantity}) cho ${cleanId} tại ${stageId}`);
-        }
         po.producedQuantity += quantity;
         const isProduced = po.producedQuantity >= po.targetQuantity;
         const isExported = (po.exportedQuantity || 0) >= po.targetQuantity;
@@ -1141,7 +1152,6 @@ export const storageService = {
             const allSubsCompleted = po.status === 'COMPLETED' && otherSubs.every(s => s.status === 'COMPLETED');
             if (allSubsCompleted) {
               masterPo.status = 'COMPLETED';
-              // masterPo.producedQuantity = masterPo.targetQuantity; 
             } else {
               masterPo.status = 'IN_PROGRESS';
             }
@@ -1188,8 +1198,8 @@ export const storageService = {
     };
   },
 
-  recordDefect(partId: string, stageId: StageId, quantity: number, reason: string, category: string, poId?: string) {
-    const cleanId = partId.split(' - ')[0].trim().toUpperCase();
+  recordDefect(partId: string, stageId: StageId, location: 'IN' | 'OUT', quantity: number, reason: string, category: string, poId?: string) {
+    const cleanId = partId.startsWith('GLZ-OUT-') ? partId.trim().toUpperCase() : partId.split(' - ')[0].trim().toUpperCase();
     
     // 1. Validation: Ensure we have enough stock in IN to mark as defect
     const inventory = this.getInventory();
@@ -1203,7 +1213,7 @@ export const storageService = {
       const itPartId = i.partId.toUpperCase().trim();
       const targetId = effectiveId.toUpperCase();
       const matchesPart = itPartId === targetId || (effectivePartName && itPartId === effectivePartName);
-      return matchesPart && i.stageId === stageId && i.location === 'IN';
+      return matchesPart && i.stageId === stageId && i.location === location;  // Fix: Check specific location
     });
     const totalStock = matchingStocks.reduce((sum, item) => sum + item.quantity, 0);
 
@@ -1221,7 +1231,7 @@ export const storageService = {
     for (const stock of matchingStocks) {
       if (remainingToDeduct <= 0) break;
       const toTake = Math.min(stock.quantity, remainingToDeduct);
-      this.updateInventory(effectiveId, stageId, 'IN', -toTake, stock.originalPartId);
+      this.updateInventory(effectiveId, stageId, location, -toTake, stock.originalPartId);
       this.updateInventory(effectiveId, stageId, 'DEFECT', toTake, stock.originalPartId);
       deductedFromOriginalId = stock.originalPartId;
       remainingToDeduct -= toTake;
@@ -1249,7 +1259,8 @@ export const storageService = {
     // Auto-create supplementary POs for compensation for any stage
     if (stageId !== 'LASER') {
       try {
-        this.createMasterPO(cleanId, quantity, Date.now(), undefined, "REPAIR", stageId);
+        const repairId = deductedFromOriginalId || cleanId;
+        this.createMasterPO(repairId, quantity, Date.now(), undefined, "REPAIR", stageId);
       } catch (err) {
         console.error("Failed to create supplementary PO:", err);
       }
@@ -1259,7 +1270,7 @@ export const storageService = {
   },
 
   recordDisposal(partId: string, stageId: StageId, quantity: number) {
-    const cleanId = partId.split(' - ')[0].trim().toUpperCase();
+    const cleanId = partId.startsWith('GLZ-OUT-') ? partId.trim().toUpperCase() : partId.split(' - ')[0].trim().toUpperCase();
     
     // 1. Validation
     const inventory = this.getInventory();
