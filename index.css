@@ -1,1 +1,38 @@
 @import "tailwindcss";
+
+@layer utilities {
+  @media print {
+    body * {
+      visibility: hidden;
+    }
+    .printable-bin-card,
+    .printable-bin-card * {
+      visibility: visible;
+    }
+    .printable-bin-card {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 100%;
+      padding: 0;
+      margin: 0;
+      box-shadow: none !important;
+      border: none !important;
+    }
+  }
+}
+
+/* Prevent iOS Safari from hijacking camera video feeds into native AVPlayer fullscreen */
+div[id^="smooth-qr-reader-"] video,
+div[id^="inline-qr-reader-"] video,
+video {
+  pointer-events: none !important;
+  -webkit-touch-callout: none !important;
+  -webkit-user-select: none !important;
+  user-select: none !important;
+  -webkit-user-drag: none !important;
+  object-fit: cover !important;
+  width: 100% !important;
+  height: 100% !important;
+}
+

@@ -1,0 +1,2700 @@
+import React, { useState, useEffect } from 'react';
+import { MaterialCallRequest, BufferLocationMap, AppSettings, Part, ViewTab, KittingQueueItem, ContainerQrTag } from './types';
+import { storageService } from './storage';
+import { SearchableSelect, SelectOption } from './SearchableSelect';
+import { InlineQrScanner } from './InlineQrScanner';
+import { SmoothCameraScanner } from './SmoothCameraScanner';
+import { parseScannedQrPayload } from './QrScannerModal';
+import { ContainerTagManagerModal } from './ContainerTagManagerModal';
+import { MasterKittingTag } from './masterExcelParser';
+import { getPartGroupConfig } from './partGroupColors';
+import {
+  Bell,
+  BellRing,
+  Send,
+  Truck,
+  CheckCircle2,
+  Clock,
+  MapPin,
+  Package,
+  User,
+  AlertCircle,
+  Volume2,
+  ArrowRight,
+  ShieldCheck,
+  Check,
+  Zap,
+  Search,
+  Settings as SettingsIcon,
+  Plus,
+  Trash2,
+  QrCode,
+  Tag,
+  X,
+  Sparkles,
+  AlertTriangle,
+  RotateCcw,
+  RefreshCw,
+  ShieldAlert,
+  Calendar,
+  Filter,
+} from 'lucide-react';
+
+interface AndonCallViewProps {
+  materialCalls: MaterialCallRequest[];
+  buffers: BufferLocationMap[];
+  parts?: Part[];
+  settings: AppSettings;
+  onRefresh: () => void;
+  onNavigateToSettings?: () => void;
+  onNavigateTab?: (tab: ViewTab) => void;
+  onSyncCloud?: () => Promise<void>;
+  viewMode?: ViewTab;
+}
+
+export const AndonCallView: React.FC<AndonCallViewProps> = ({
+  materialCalls,
+  buffers,
+  parts,
+  settings,
+  onRefresh,
+  onNavigateToSettings,
+  onNavigateTab,
+  onSyncCloud,
+  viewMode,
+}) => {
+  const getInitialTab = (): 'request' | 'calling' | 'delivering' | 'history' => {
+    if (viewMode === 'andon_request') return 'request';
+    if (viewMode === 'andon_calling') return 'calling';
+    if (viewMode === 'andon_delivering') return 'delivering';
+    if (viewMode === 'andon_history') return 'history';
+    return 'calling';
+  };
+
+  const [activeTab, setActiveTab] = useState<'request' | 'calling' | 'delivering' | 'history'>(getInitialTab);
+  const [isPullingCloud, setIsPullingCloud] = useState(false);
+  const [syncingRequestIds, setSyncingRequestIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (viewMode === 'andon_request') setActiveTab('request');
+    else if (viewMode === 'andon_calling') setActiveTab('calling');
+    else if (viewMode === 'andon_delivering') setActiveTab('delivering');
+    else if (viewMode === 'andon_history') setActiveTab('history');
+  }, [viewMode]);
+
+  const effectiveTab = React.useMemo(() => {
+    if (viewMode === 'andon_request' || viewMode === 'andon') return 'request';
+    if (viewMode === 'andon_calling') return 'calling';
+    if (viewMode === 'andon_delivering') return 'delivering';
+    if (viewMode === 'andon_history') return 'history';
+    return activeTab;
+  }, [viewMode, activeTab]);
+
+  const handleTabClick = (tab: 'request' | 'calling' | 'delivering' | 'history') => {
+    setActiveTab(tab);
+    if (onNavigateTab) {
+      if (tab === 'request') onNavigateTab('andon_request');
+      else if (tab === 'calling') onNavigateTab('andon_calling');
+      else if (tab === 'delivering') onNavigateTab('andon_delivering');
+      else if (tab === 'history') onNavigateTab('andon_history');
+    }
+  };
+
+  // Buffer locations state - TẮT REALTIME theo yêu cầu người dùng.
+  // Số tồn kệ và danh sách linh kiện KHÔNG tự động cập nhật trong nền.
+  // Phải nhấn nút "Làm mới tồn kệ" hoặc "Đồng bộ Supabase" thì mới hiển thị số tồn mới.
+  const [andonBuffers, setAndonBuffers] = useState<BufferLocationMap[]>(() => {
+    return buffers && buffers.length > 0 ? buffers : storageService.getBufferLocations();
+  });
+
+  const handleSyncFromCloud = async () => {
+    try {
+      setIsPullingCloud(true);
+      await storageService.fetchMaterialCallsFromCloud(true);
+      await storageService.fetchBufferMapFromCloud(true);
+      const freshBuffers = storageService.getBufferLocations();
+      setAndonBuffers(freshBuffers);
+      onRefresh();
+      if (onSyncCloud) {
+        await onSyncCloud();
+      }
+      setMessage({
+        type: 'success',
+        text: '☁️ Đã đồng bộ Supabase Cloud & cập nhật số tồn mới trên kệ Outbuffer thành công!',
+      });
+    } catch (err: any) {
+      setMessage({
+        type: 'error',
+        text: `Lỗi kéo dữ liệu từ Supabase: ${err?.message || 'Không thể kết nối'}`,
+      });
+    } finally {
+      setIsPullingCloud(false);
+    }
+  };
+
+  const handleManualRefreshStock = async () => {
+    try {
+      setIsPullingCloud(true);
+      await storageService.fetchBufferMapFromCloud(true);
+      const freshBuffers = storageService.getBufferLocations();
+      setAndonBuffers(freshBuffers);
+      onRefresh();
+      setMessage({
+        type: 'success',
+        text: '🔄 Đã làm mới số tồn kệ Outbuffer thành công!',
+      });
+    } catch {
+      setAndonBuffers(storageService.getBufferLocations());
+      onRefresh();
+      setMessage({
+        type: 'success',
+        text: '🔄 Đã làm mới số tồn kệ Outbuffer từ bộ nhớ máy!',
+      });
+    } finally {
+      setIsPullingCloud(false);
+    }
+  };
+
+  // Master parts list
+  const allParts = React.useMemo(() => {
+    return parts && parts.length > 0 ? parts : storageService.getParts();
+  }, [parts]);
+
+  // Assembly lines list from Settings
+  const assemblyLinesList = (settings.assemblyLines && settings.assemblyLines.length > 0)
+    ? settings.assemblyLines
+    : [
+        'Bàn Lắp Ráp Bo Mạch Line 1',
+        'Dây Chuyền SMT Tự Động 2',
+        'Bàn Lắp Khung Cơ Khí 3',
+        'Khu Kiểm Thử Quality Check 4',
+      ];
+
+  // Current logged in user
+  const currentUser = storageService.getCurrentUser();
+  const defaultRequester = currentUser
+    ? `${currentUser.fullName} (${currentUser.roleTitle || currentUser.username})`
+    : (settings.staffList && settings.staffList[0]) || 'Nguyễn Văn A (Trưởng Dây Chuyền 1)';
+
+  // Request form state - Default assemblyLine to 'DCLR', default requestedBy to logged in user
+  const getDefaultRequiredTime = () => {
+    const now = new Date();
+    now.setMinutes(now.getMinutes() + 15);
+    const hours = String(now.getHours()).padStart(2, '0');
+    const minutes = String(now.getMinutes()).padStart(2, '0');
+    return `${hours}:${minutes}`;
+  };
+
+  const [assemblyLine, setAssemblyLine] = useState('DCLR');
+  const [isCustomLineMode, setIsCustomLineMode] = useState(false);
+  const [isManageLinesModalOpen, setIsManageLinesModalOpen] = useState(false);
+  const [newLineInput, setNewLineInput] = useState('');
+
+  const [selectedPartCode, setSelectedPartCode] = useState('');
+  const [requestedQty, setRequestedQty] = useState<number>(10);
+  const [requestedBy, setRequestedBy] = useState(defaultRequester);
+  const [requiredTime, setRequiredTime] = useState<string>(getDefaultRequiredTime);
+
+  // QR Code scanning states for Phiếu Thông Tin / Thẻ Thùng
+  const [isAndonCameraScanning, setIsAndonCameraScanning] = useState(false);
+  const [isAndonModalCameraOpen, setIsAndonModalCameraOpen] = useState(false);
+  const [andonQrInputText, setAndonQrInputText] = useState('');
+  const [isAndonTagManagerOpen, setIsAndonTagManagerOpen] = useState(false);
+  const [andonScanMessage, setAndonScanMessage] = useState('');
+
+  // Selected pick shelf for Andon call (FIFO recommended or user-selected)
+  const [selectedPickShelf, setSelectedPickShelf] = useState<string>('');
+
+  // State for Andon Scan Popup Modal & Error Modal
+  const [andonModalData, setAndonModalData] = useState<{
+    isOpen: boolean;
+    partCode: string;
+    partName: string;
+    unit: string;
+    standardQty: number;
+    isKitted: boolean;
+    recommendedLocation: string;
+    availableShelves: string[];
+    availableBuffers: BufferLocationMap[];
+    kittedStockQty: number;
+    pendingRawQty: number;
+    statusText: string;
+    locationGuideText: string;
+  } | null>(null);
+
+  const [andonErrorModal, setAndonErrorModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+  } | null>(null);
+
+  // Success Confirmation Modal State (renders prominent popup after calling on mobile/desktop)
+  const [callSuccessModalData, setCallSuccessModalData] = useState<{
+    isOpen: boolean;
+    request: MaterialCallRequest;
+    proposedMasterQty?: number | null;
+  } | null>(null);
+
+  // Proposed standard quantity from Thẻ Thùng Master Data
+  const [proposedMasterQty, setProposedMasterQty] = useState<number | null>(null);
+
+  // Master container tags cache
+  const masterContainerTags = React.useMemo(() => {
+    return storageService.getMasterContainerTags();
+  }, []);
+
+  const customContainerTags = React.useMemo(() => {
+    return storageService.getCustomGeneratedContainerTags();
+  }, []);
+
+  // Helper to find standard quantity from Master Container Tags (Thẻ Thùng Master Data)
+  const getMasterTagForPart = React.useCallback(
+    (pCode: string) => {
+      if (!pCode) return null;
+      const clean = pCode.trim().toLowerCase();
+      const m = masterContainerTags.find((t) => t.partCode && t.partCode.trim().toLowerCase() === clean);
+      if (m && m.standardQty > 0) return m;
+      const c = customContainerTags.find((t) => t.partCode && t.partCode.trim().toLowerCase() === clean);
+      if (c && c.standardQty > 0) return c;
+      return null;
+    },
+    [masterContainerTags, customContainerTags]
+  );
+
+  const [showManualForm, setShowManualForm] = useState(false);
+
+  useEffect(() => {
+    if (currentUser) {
+      const userStr = `${currentUser.fullName} (${currentUser.roleTitle || currentUser.username})`;
+      setRequestedBy(userStr);
+      setDelivererName(userStr);
+    }
+  }, [currentUser]);
+
+  // Handle parsing QR code from Phiếu Thông Tin / Thẻ Thùng for Andon Call
+  const handleParseAndonQrPayload = (payloadStr: string) => {
+    if (!payloadStr) return;
+    const rawClean = payloadStr.replace(/^\uFEFF/, '').replace(/^["']|["']$/g, '').trim();
+    if (!rawClean) return;
+
+    setAndonQrInputText(rawClean);
+
+    // STRICT VALIDATION: Only accept codes from Master Data (539 Tags) or Custom Generated Tags
+    let validation = storageService.findAndValidateContainerTag(rawClean);
+
+    // Fallback if rawClean is a direct Part Code from Parts Inventory
+    if (!validation.isValid || !validation.matchedTag) {
+      const allParts = storageService.getParts();
+      const matchedDirectPart = allParts.find(
+        (p) => p.code.trim().toLowerCase() === rawClean.toLowerCase()
+      );
+      if (matchedDirectPart) {
+        const fallbackTag: MasterKittingTag = {
+          id: `TAG_${matchedDirectPart.code}`,
+          stt: 'Số 1',
+          partCode: matchedDirectPart.code,
+          partName: matchedDirectPart.name,
+          standardQty: 10,
+          unit: matchedDirectPart.unit || 'Cái',
+          groupName: 'Nhóm linh kiện',
+          ccdcSpec: 'TIÊU CHUẨN',
+          groupConfig: getPartGroupConfig('Nhóm linh kiện'),
+          qrPayload: matchedDirectPart.code,
+        };
+        validation = {
+          isValid: true,
+          matchedTag: fallbackTag,
+          source: 'CUSTOM_GENERATED',
+          extractedPartCode: matchedDirectPart.code,
+          extractedQty: fallbackTag.standardQty,
+        };
+      }
+    }
+
+    if (!validation.isValid || !validation.matchedTag) {
+      setAndonErrorModal({
+        isOpen: true,
+        title: 'MÃ THẺ THÙNG KHÔNG HỢP LỆ',
+        message: validation.errorReason || `⛔ Mã QR "${rawClean}" KHÔNG TỒN TẠI trong Danh Sách Thẻ Thùng Master Data (539 Thẻ) hoặc Thẻ Thùng Phát Sinh! Hệ thống chỉ chấp nhận mã QR Thẻ Thùng hợp lệ đã được quản lý.`,
+      });
+      return;
+    }
+
+    const matchedTag = validation.matchedTag;
+    const allPartsList = storageService.getParts();
+    const kittingQueue = storageService.getKittingQueue();
+    const pendingKittingItems = kittingQueue.filter((k) => k.status === 'PENDING_KITTING');
+
+    const matchedPart = allPartsList.find((p) => p.code.trim().toLowerCase() === matchedTag.partCode.trim().toLowerCase());
+
+    const targetPartCode = matchedTag.partCode;
+    const targetPartName = matchedTag.partName || (matchedPart ? matchedPart.name : matchedTag.partCode);
+    const targetUnit = matchedTag.unit || (matchedPart ? matchedPart.unit : 'Cái');
+    const targetQty = validation.extractedQty !== undefined && validation.extractedQty > 0
+      ? validation.extractedQty
+      : (matchedTag.standardQty && matchedTag.standardQty > 0 ? matchedTag.standardQty : 10);
+
+    const bufferEntry = bufferPartsMap.get(targetPartCode.trim());
+    const pendingItemsForCode = pendingKittingItems.filter((k) => k.partCode.trim().toLowerCase() === targetPartCode.trim().toLowerCase());
+
+    const stockOnBuffer = bufferEntry ? bufferEntry.totalBufferStock : 0;
+    const pendingRawQty = pendingItemsForCode.reduce((sum, i) => sum + i.rawQuantity, 0);
+    const totalAvailable = stockOnBuffer + pendingRawQty;
+
+    // STRICT USER REQUIREMENT: Only accept parts that exist in either Pending Kitting Queue (Chờ bóc tách) OR on Outbuffer Shelves
+    if (totalAvailable <= 0) {
+      setAndonErrorModal({
+        isOpen: true,
+        title: '⛔ TỪ CHỐI GỌI HÀNG - LINH KIỆN CHƯA CÓ HÀNG',
+        message: `Linh kiện [${targetPartCode}] - ${targetPartName} HIỆN CHƯA CÓ HÀNG ĐỂ GỌI!\n\n• Danh Sách Chờ Bóc Tách: 0 ${targetUnit} (Chưa xuất kho thô)\n• Tồn Kệ Outbuffer: 0 ${targetUnit} (Chưa bóc tách kitting lên kệ)\n\n👉 Quy định hệ thống: Chỉ chấp nhận phát tín hiệu gọi hàng cho những linh kiện ĐÃ CÓ trong "Danh Sách Chờ Bóc Tách" (giao trực tiếp qua DCLR) hoặc ĐÃ BÓC TÁCH nằm trên Kệ OUTBUFFER.\n\nVui lòng liên hệ Kho Tổng thực hiện Phiếu Xuất Thô linh kiện trước khi phát tín hiệu gọi hàng!`,
+      });
+      return;
+    }
+
+    // Determine Kitting status & location recommendation
+    let isKitted = false;
+    let recLocation = 'DCLR';
+    let availableShelves: string[] = [];
+    let statusText = '';
+    let locationGuideText = '';
+
+    if (stockOnBuffer > 0 && bufferEntry && bufferEntry.availableBuffers.length > 0) {
+      isKitted = true;
+      availableShelves = bufferEntry.availableBuffers.map((b) => b.locationId);
+      recLocation = availableShelves[0]; // FIFO shelf recommendation
+      setSelectedPickShelf(recLocation);
+      statusText = `🟢 ĐÃ BÓC TÁCH KITTING (Sẵn sàng trên ${availableShelves.length} Kệ Outbuffer)`;
+      locationGuideText = `📍 Linh kiện ĐÃ KITTING lên Kệ Outbuffer. Kệ gợi ý FIFO: ${recLocation} (Tồn kệ: ${bufferEntry.availableBuffers[0]?.currentStockQty || stockOnBuffer} ${targetUnit} | Tổng tồn Outbuffer: ${stockOnBuffer} ${targetUnit}). Logistics sẽ lấy từ kệ này và trừ tồn kho kệ khi hoàn tất giao.`;
+    } else {
+      // Not on Outbuffer shelves, but available in Pending Kitting Queue -> Direct delivery via DCLR!
+      isKitted = false;
+      recLocation = 'DCLR';
+      setSelectedPickShelf('DCLR');
+      statusText = `🟡 CHƯA KITTING - GIAO TRỰC TIẾP QUA DCLR (Tồn Chờ Bóc Tách: ${pendingRawQty} ${targetUnit})`;
+      locationGuideText = `🚚 Linh kiện chưa kịp bóc tách kitting nhưng ĐÃ CÓ trong Danh Sách Chờ Bóc Tách (${pendingRawQty} ${targetUnit}). Logistics sẽ giao trực tiếp qua DCLR và hệ thống sẽ TIÊU HAO/TRỪ TỒN ${Math.min(targetQty, pendingRawQty)} ${targetUnit} trong Danh Sách Chờ Bóc Tách khi hoàn tất giao hàng!`;
+    }
+
+    // Auto update selected part code & values
+    setSelectedPartCode(targetPartCode);
+    const initialCallQty = isKitted
+      ? Math.min(targetQty, stockOnBuffer)
+      : Math.min(targetQty, pendingRawQty);
+    setRequestedQty(initialCallQty > 0 ? initialCallQty : targetQty);
+
+    if (assemblyLinesList && assemblyLinesList.length > 0) {
+      setAssemblyLine(assemblyLinesList[0]);
+    }
+
+    // Open Andon Scan Modal IMMEDIATELY
+    setAndonModalData({
+      isOpen: true,
+      partCode: targetPartCode,
+      partName: targetPartName,
+      unit: targetUnit,
+      standardQty: targetQty,
+      isKitted,
+      recommendedLocation: recLocation,
+      availableShelves,
+      availableBuffers: bufferEntry ? bufferEntry.availableBuffers : [],
+      kittedStockQty: stockOnBuffer,
+      pendingRawQty,
+      statusText,
+      locationGuideText,
+    });
+  };
+
+  // Logistics deliver modal / confirm state
+  const defaultDeliverer = currentUser
+    ? `${currentUser.fullName} (${currentUser.roleTitle || currentUser.username})`
+    : (settings.staffList && settings.staffList[0]) || 'Lê Hoàng Nam (Thủ Kho Logistics)';
+
+  const [delivererName, setDelivererName] = useState(defaultDeliverer);
+  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // Get Kitting Queue items waiting for kitting (đã xuất kho thô, chờ bóc tách)
+  const kittingQueue = storageService.getKittingQueue();
+  const pendingKittingItems = kittingQueue.filter((k) => k.status === 'PENDING_KITTING');
+
+  interface BufferPartSummary {
+    partCode: string;
+    partName: string;
+    unit: string;
+    totalBufferStock: number;
+    availableBuffers: BufferLocationMap[];
+  }
+
+  // Group available stock on Outbuffer shelves by part code (Memoized for high performance on weak phones)
+  // TẮT REALTIME: Chỉ recompute khi andonBuffers thay đổi (khi bấm nút "Làm mới tồn kệ" hoặc "Đồng bộ Supabase")
+  const bufferPartsMap = React.useMemo<Map<string, BufferPartSummary>>(() => {
+    const map = new Map<string, BufferPartSummary>();
+
+    andonBuffers.forEach((b) => {
+      if (b.status !== 'EMPTY') {
+        const itemsOnShelf = (b.items && b.items.length > 0)
+          ? b.items
+          : (b.partCode ? [{ partCode: b.partCode, partName: b.partName || b.partCode, unit: b.unit || 'PCS', currentStockQty: b.currentStockQty }] : []);
+
+        itemsOnShelf.forEach((item) => {
+          if (item.partCode && item.currentStockQty > 0) {
+            const code = item.partCode.trim();
+            if (!map.has(code)) {
+              map.set(code, {
+                partCode: code,
+                partName: item.partName || code,
+                unit: item.unit || 'PCS',
+                totalBufferStock: item.currentStockQty,
+                availableBuffers: [{
+                  ...b,
+                  partCode: item.partCode,
+                  partName: item.partName,
+                  unit: item.unit,
+                  currentStockQty: item.currentStockQty,
+                }],
+              });
+            } else {
+              const entry = map.get(code)!;
+              entry.totalBufferStock += item.currentStockQty;
+              entry.availableBuffers.push({
+                ...b,
+                partCode: item.partCode,
+                partName: item.partName,
+                unit: item.unit,
+                currentStockQty: item.currentStockQty,
+              });
+            }
+          }
+        });
+      }
+    });
+
+    // Sort each part's available buffers by FIFO (oldest lastUpdated first)
+    map.forEach((entry) => {
+      entry.availableBuffers.sort((a, b) => {
+        const timeA = a.lastUpdated ? new Date(a.lastUpdated).getTime() : 0;
+        const timeB = b.lastUpdated ? new Date(b.lastUpdated).getTime() : 0;
+        return timeA - timeB;
+      });
+    });
+
+    return map;
+  }, [andonBuffers]);
+
+  // Prepare searchable options for SearchableSelect (Memoized)
+  // Rule: ONLY allow parts that are either on Outbuffer shelves OR in Pending Kitting list (đã xuất kho thô)
+  const partSelectOptions: SelectOption[] = React.useMemo(() => {
+    const options: SelectOption[] = Array.from(bufferPartsMap.values()).map((p: BufferPartSummary) => {
+      const shelfListStr = p.availableBuffers.map((b) => b.locationId).join(', ');
+      return {
+        value: p.partCode,
+        label: `[${p.partCode}] ${p.partName}`,
+        sublabel: `Tồn Outbuffer: ${p.totalBufferStock} ${p.unit} | Kệ: ${shelfListStr}`,
+        badge: `Sẵn sàng Kệ ${p.availableBuffers[0].locationId}`,
+      };
+    });
+
+    // Add parts from "Danh sách chờ bóc tách" that are not on Outbuffer shelves yet
+    const seenPendingPartCodes = new Set<string>();
+    pendingKittingItems.forEach((kit) => {
+      if (!bufferPartsMap.has(kit.partCode) && !seenPendingPartCodes.has(kit.partCode)) {
+        seenPendingPartCodes.add(kit.partCode);
+        options.push({
+          value: kit.partCode,
+          label: `[${kit.partCode}] ${kit.partName}`,
+          sublabel: `Đã xuất kho thô (Chờ bóc tách Kitting): ${kit.rawQuantity} ${kit.unit}`,
+          badge: `📦 Chờ Bóc Tách Kitting`,
+        });
+      }
+    });
+
+    return options;
+  }, [bufferPartsMap, pendingKittingItems]);
+
+  // Automatically select first available part if none selected
+  useEffect(() => {
+    if (partSelectOptions.length > 0) {
+      if (!selectedPartCode) {
+        const firstVal = partSelectOptions[0].value;
+        setSelectedPartCode(firstVal);
+        const mTag = getMasterTagForPart(firstVal);
+        if (mTag && mTag.standardQty > 0) {
+          setRequestedQty(mTag.standardQty);
+          setProposedMasterQty(mTag.standardQty);
+        }
+      }
+    } else {
+      setSelectedPartCode('');
+      setProposedMasterQty(null);
+    }
+  }, [partSelectOptions, selectedPartCode, getMasterTagForPart]);
+
+  // Keep assemblyLine in sync if settings update
+  useEffect(() => {
+    if (assemblyLinesList.length > 0 && !assemblyLinesList.includes(assemblyLine)) {
+      setAssemblyLine(assemblyLinesList[0]);
+    }
+  }, [assemblyLinesList]);
+
+  // Determine auto-selected buffer location for the chosen part code
+  const chosenBufferInfo = bufferPartsMap.get(selectedPartCode);
+  let targetBufferLocation = '';
+  let availableQtyOnShelf = 0;
+  let partName = '';
+  let unit = 'PCS';
+  let isDirectKitting = false;
+  let availableBuffersForPart: BufferLocationMap[] = [];
+
+  if (chosenBufferInfo && chosenBufferInfo.availableBuffers.length > 0) {
+    availableBuffersForPart = chosenBufferInfo.availableBuffers;
+    const selectedBufObj = availableBuffersForPart.find((b) => b.locationId === selectedPickShelf) || availableBuffersForPart[0];
+    targetBufferLocation = selectedBufObj.locationId;
+    availableQtyOnShelf = selectedBufObj.currentStockQty;
+    partName = selectedBufObj.partName || chosenBufferInfo.partName;
+    unit = selectedBufObj.unit || chosenBufferInfo.unit;
+    isDirectKitting = false;
+  } else {
+    // Part is in Pending Kitting list
+    const pendingItem = pendingKittingItems.find((k) => k.partCode === selectedPartCode);
+    const masterPart = allParts.find((p) => p.code === selectedPartCode);
+    partName = pendingItem?.partName || masterPart?.name || selectedPartCode;
+    unit = pendingItem?.unit || masterPart?.unit || 'PCS';
+    targetBufferLocation = 'KHU BÓC TÁCH KITTING';
+    availableQtyOnShelf = 0;
+    isDirectKitting = true;
+  }
+
+  const handleCreateCallRequest = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!selectedPartCode) {
+      setMessage({ type: 'error', text: 'Vui lòng chọn mã linh kiện cần gọi!' });
+      return;
+    }
+
+    if (isDirectKitting) {
+      const pendingItemsForPart = pendingKittingItems.filter((k) => k.partCode === selectedPartCode);
+      const maxPendingQty = pendingItemsForPart.reduce((sum, k) => sum + k.rawQuantity, 0);
+      if (requestedQty > maxPendingQty && maxPendingQty > 0) {
+        setMessage({
+          type: 'error',
+          text: `Số lượng yêu cầu (${requestedQty}) vượt quá giới hạn số lượng trong danh sách chờ bóc tách Kitting (${maxPendingQty} ${unit})! Không được gọi vượt quá số lượng này.`,
+        });
+        return;
+      }
+    } else if (chosenBufferInfo && requestedQty > availableQtyOnShelf) {
+      setMessage({
+        type: 'error',
+        text: `Số lượng yêu cầu (${requestedQty}) vượt quá tồn kho khả dụng trên Kệ ${targetBufferLocation} (${availableQtyOnShelf} ${unit})! Không được gọi vượt quá số lượng tồn.`,
+      });
+      return;
+    }
+
+    try {
+      const { newReq, cloudSynced } = await storageService.createMaterialCallRequestAndSync({
+        assemblyLine,
+        partCode: selectedPartCode,
+        partName: partName || selectedPartCode,
+        unit,
+        requestedQty,
+        bufferLocation: targetBufferLocation,
+        isDirectKitting,
+        requestedBy,
+        requiredTime: requiredTime || getDefaultRequiredTime(),
+      });
+
+      // Audio notification chime
+      try {
+        const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(587.33, audioCtx.currentTime); // D5
+        osc.frequency.setValueAtTime(880, audioCtx.currentTime + 0.15); // A5
+        gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.5);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.5);
+      } catch {
+        // Fallback
+      }
+
+      const deductInfo = isDirectKitting
+        ? `Đã trừ ${requestedQty} ${unit} trong Danh Sách Chờ Bóc Tách (Giao trực tiếp qua DCLR)`
+        : `Đã trừ ${requestedQty} ${unit} trên kệ Outbuffer ${targetBufferLocation}`;
+
+      if (cloudSynced) {
+        setMessage({
+          type: 'success',
+          text: `🚀 Đã phát tín hiệu ANDON gọi mã linh kiện [${selectedPartCode}] thành công & đồng bộ Supabase Cloud! ${deductInfo}. Bạn có thể tiếp tục gọi linh kiện khác bên dưới.`,
+        });
+      } else {
+        setMessage({
+          type: 'error',
+          text: `⚠️ Đã tạo đơn gọi [${selectedPartCode}] tại máy nhưng CHƯA ĐỒNG BỘ ĐƯỢC LÊN SUPABASE CLOUD! Vui lòng kiểm tra mạng và bấm "Đồng Bộ Supabase Cloud".`,
+        });
+      }
+
+      // Display prominent success popup modal for mobile & desktop confirmation
+      setCallSuccessModalData({
+        isOpen: true,
+        request: newReq,
+        proposedMasterQty,
+      });
+
+      onRefresh();
+      // Giữ nguyên tại tab gọi hàng (không nhảy qua tab đơn đang gọi) để người thao tác tiếp tục gọi
+      setSelectedPartCode('');
+      setRequestedQty(10);
+      setProposedMasterQty(null);
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err.message || 'Lỗi khi tạo tín hiệu Andon' });
+    }
+  };
+
+  const handleConfirmAndonFromModal = async () => {
+    if (!andonModalData) return;
+    const { partCode, partName, unit, isKitted, recommendedLocation, availableBuffers, kittedStockQty, pendingRawQty } = andonModalData;
+    const targetLine = assemblyLine || 'DCLR';
+    const chosenPickLocation = isKitted ? (selectedPickShelf || recommendedLocation) : 'KHU BÓC TÁCH KITTING';
+
+    // Stock validation against actual available quantity on chosen shelf
+    const chosenBuf = availableBuffers.find((b) => b.locationId === chosenPickLocation);
+    const availableQty = chosenBuf ? chosenBuf.currentStockQty : kittedStockQty;
+
+    if (isKitted) {
+      if (requestedQty > availableQty && availableQty > 0) {
+        setMessage({
+          type: 'error',
+          text: `Số lượng yêu cầu (${requestedQty}) vượt quá tồn kho khả dụng trên Kệ ${chosenPickLocation} (${availableQty} ${unit})! Không thể phát tín hiệu gọi quá số lượng.`,
+        });
+        setAndonModalData(null);
+        return;
+      }
+    } else {
+      if (requestedQty > pendingRawQty && pendingRawQty > 0) {
+        setMessage({
+          type: 'error',
+          text: `Số lượng yêu cầu (${requestedQty}) vượt quá số lượng khả dụng trong Danh Sách Chờ Bóc Tách (${pendingRawQty} ${unit})! Không thể phát tín hiệu gọi quá số lượng.`,
+        });
+        setAndonModalData(null);
+        return;
+      }
+    }
+
+    try {
+      const { newReq, cloudSynced } = await storageService.createMaterialCallRequestAndSync({
+        assemblyLine: targetLine,
+        partCode: partCode,
+        partName: partName || partCode,
+        unit: unit || 'Cái',
+        requestedQty: requestedQty,
+        bufferLocation: chosenPickLocation,
+        isDirectKitting: !isKitted,
+        requestedBy: requestedBy,
+        requiredTime: requiredTime || getDefaultRequiredTime(),
+      });
+
+      // Sound notification chime
+      try {
+        const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(587.33, audioCtx.currentTime);
+        osc.frequency.setValueAtTime(880, audioCtx.currentTime + 0.15);
+        gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.5);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.5);
+      } catch {
+        // Fallback
+      }
+
+      const deductDetail = !isKitted
+        ? `Đã trừ ${requestedQty} ${unit} trong Danh Sách Chờ Bóc Tách (Giao trực tiếp qua DCLR)`
+        : `Đã trừ ${requestedQty} ${unit} trên kệ Outbuffer ${chosenPickLocation}`;
+
+      if (cloudSynced) {
+        setMessage({
+          type: 'success',
+          text: `🚀 Đã phát tín hiệu ANDON gọi mã linh kiện [${partCode}] thành công & đồng bộ Supabase Cloud! ${deductDetail}. Vị trí giao: ${targetLine}`,
+        });
+      } else {
+        setMessage({
+          type: 'error',
+          text: `⚠️ Đã tạo đơn gọi [${partCode}] tại máy nhưng CHƯA ĐỒNG BỘ ĐƯỢC LÊN SUPABASE CLOUD! Vui lòng kiểm tra mạng và bấm "Đồng Bộ Supabase Cloud".`,
+        });
+      }
+
+      // Open Success Confirmation Modal for mobile clarity
+      setCallSuccessModalData({
+        isOpen: true,
+        request: newReq,
+        proposedMasterQty: requestedQty,
+      });
+
+      onRefresh();
+      // Giữ nguyên tab gọi hàng để tiếp tục thao tác
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err.message || 'Lỗi khi tạo tín hiệu Andon' });
+    }
+
+    setAndonModalData(null);
+  };
+
+  const handleStartDelivery = async (requestId: string) => {
+    if (syncingRequestIds.includes(requestId)) return;
+    setSyncingRequestIds((prev) => [...prev, requestId]);
+    try {
+      const { updated, cloudSynced } = await storageService.updateMaterialCallStatusAndSync(
+        requestId,
+        'DELIVERING',
+        delivererName
+      );
+      if (cloudSynced) {
+        setMessage({
+          type: 'success',
+          text: `🚚 Đã nhận đơn giao [${updated.partCode}] (${updated.requestedQty.toLocaleString('vi-VN')} ${updated.unit}) thành công! Đơn hàng đã chuyển sang mục "Đang trên đường vận chuyển" và đồng bộ Supabase Cloud.`,
+        });
+      } else {
+        setMessage({
+          type: 'error',
+          text: `⚠️ Đã chuyển đơn [${updated.partCode}] tại máy nhưng CHƯA ĐỒNG BỘ ĐƯỢC LÊN SUPABASE CLOUD (lỗi kết nối/mạng)! Các máy khác sẽ vẫn thấy đơn đang chờ nhận. Vui lòng kiểm tra mạng và bấm "Đồng Bộ Supabase Cloud" ngay!`,
+        });
+      }
+      onRefresh();
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err.message });
+    } finally {
+      setSyncingRequestIds((prev) => prev.filter((id) => id !== requestId));
+    }
+  };
+
+  const handleCompleteDelivery = async (requestId: string) => {
+    if (syncingRequestIds.includes(requestId)) return;
+    setSyncingRequestIds((prev) => [...prev, requestId]);
+    try {
+      const { updated, cloudSynced } = await storageService.updateMaterialCallStatusAndSync(
+        requestId,
+        'COMPLETED',
+        delivererName
+      );
+      if (cloudSynced) {
+        setMessage({
+          type: 'success',
+          text: `🎉 Xác nhận Giao Hàng Thành Công đơn [${updated.partCode}]! Đã hoàn tất và đồng bộ Supabase Cloud.`,
+        });
+      } else {
+        setMessage({
+          type: 'error',
+          text: `⚠️ Đã xác nhận giao đơn [${updated.partCode}] tại máy nhưng CHƯA ĐỒNG BỘ ĐƯỢC LÊN SUPABASE CLOUD! Vui lòng kiểm tra mạng và bấm "Đồng Bộ Supabase Cloud" ngay!`,
+        });
+      }
+      onRefresh();
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err.message });
+    } finally {
+      setSyncingRequestIds((prev) => prev.filter((id) => id !== requestId));
+    }
+  };
+
+  const isAdmin =
+    currentUser?.username === 'admin' ||
+    currentUser?.roleTitle?.toLowerCase().includes('admin') ||
+    currentUser?.roleTitle?.toLowerCase().includes('quản trị') ||
+    (currentUser?.allowedTabs && currentUser.allowedTabs.includes('settings'));
+
+  const handleAdminDeleteRequest = async (requestId: string, isCompleted: boolean = false) => {
+    if (!window.confirm('ADMIN XÁC NHẬN: Bạn có chắc chắn muốn XÓA yêu cầu cấp hàng này không? Đơn sẽ bị xóa vĩnh viễn trên Supabase Cloud và các máy khác bấm Làm mới / Đồng bộ sẽ lập tức mất đơn!')) {
+      return;
+    }
+    try {
+      await storageService.deleteMaterialCallRequest(requestId, isCompleted);
+      setMessage({
+        type: 'success',
+        text: '🗑️ [ADMIN] Đã xóa thành công yêu cầu cấp hàng và đồng bộ xóa trên Supabase Cloud!' + (isCompleted ? ' Tồn kho kệ Buffer đã được hoàn trả tự động.' : ''),
+      });
+      onRefresh();
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err.message || 'Lỗi khi xóa yêu cầu' });
+    }
+  };
+
+  const handleAdminClearAllCalling = async () => {
+    if (!window.confirm(`ADMIN XÁC NHẬN: Bạn có chắc chắn muốn XÓA TẤT CẢ ${callingReqs.length} đơn yêu cầu đang gọi này không? Tất cả các đơn này sẽ bị xóa vĩnh viễn trên Supabase Cloud và không bao giờ tái xuất hiện khi đồng bộ!`)) {
+      return;
+    }
+    try {
+      await storageService.clearAllCallingRequests();
+      setMessage({
+        type: 'success',
+        text: `🗑️ [ADMIN] Đã xóa vĩnh viễn tất cả ${callingReqs.length} đơn đang gọi và đồng bộ lên Supabase Cloud thành công!`,
+      });
+      onRefresh();
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err.message || 'Lỗi khi xóa tất cả đơn' });
+    }
+  };
+
+  const handleAdminRollbackRequest = async (requestId: string, targetStatus: 'CALLING' | 'DELIVERING') => {
+    const statusLabel = targetStatus === 'CALLING' ? '1. ĐANG GỌI HÀNG' : '2. ĐANG VẬN CHUYỂN';
+    if (!window.confirm(`ADMIN XÁC NHẬN: Bạn có muốn ROLLBACK đơn này về trạng thái [${statusLabel}] không?`)) {
+      return;
+    }
+    try {
+      await storageService.rollbackMaterialCallStatus(requestId, targetStatus);
+      setMessage({
+        type: 'success',
+        text: `↩️ [ADMIN] Đã rollback thành công yêu cầu về trạng thái ${statusLabel}! (Tồn kho kệ Buffer đã được cập nhật tự động nếu cần)`,
+      });
+      onRefresh();
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err.message || 'Lỗi khi rollback' });
+    }
+  };
+
+  // Priority sorting: Sort by requiredTime (earliest needed time first), fallback to requestedAt
+  const callingReqs = React.useMemo(() => {
+    return materialCalls
+      .filter((m) => m.status === 'CALLING')
+      .sort((a, b) => {
+        if (a.requiredTime && b.requiredTime) {
+          return a.requiredTime.localeCompare(b.requiredTime);
+        }
+        if (a.requiredTime) return -1;
+        if (b.requiredTime) return 1;
+        return new Date(a.requestedAt).getTime() - new Date(b.requestedAt).getTime();
+      });
+  }, [materialCalls]);
+
+  const deliveringReqs = React.useMemo(() => {
+    return materialCalls.filter((m) => m.status === 'DELIVERING');
+  }, [materialCalls]);
+
+  const completedReqs = React.useMemo(() => {
+    return materialCalls
+      .filter((m) => m.status === 'COMPLETED')
+      .sort((a, b) => new Date(b.deliveredAt || b.requestedAt).getTime() - new Date(a.deliveredAt || a.requestedAt).getTime());
+  }, [materialCalls]);
+
+  // Date Filtering State for Tab 4 (Lịch sử giao cấp hàng) - Defaults to Today
+  const getTodayStr = () => {
+    const d = new Date();
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
+  const getDaysAgoStr = (days: number) => {
+    const d = new Date();
+    d.setDate(d.getDate() - days);
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
+  // IN-MEMORY RAM TTL CACHE (5 PHÚT = 300,000 MS)
+  // Cắt giảm 100% Egress Supabase khi chuyển đổi qua lại giữa các Tab hoặc các bộ lọc đã truy vấn
+  const ANDON_HISTORY_CACHE_TTL_MS = 5 * 60 * 1000;
+  const andonHistoryMemoryCache = React.useRef(new Map<string, { data: MaterialCallRequest[]; timestamp: number }>());
+
+  // 1. MẶC ĐỊNH LỌC THEO NGÀY HIỆN TẠI (TODAY):
+  // Không tự động kéo 35 ngày khi vừa mở. Chỉ nạp 35 ngày khi người dùng chủ động click nút "35 ngày"
+  const [historyPreset, setHistoryPreset] = useState<'today' | '3days' | '7days' | '35days' | 'all' | 'custom'>('today');
+  const [historyStartDate, setHistoryStartDate] = useState<string>(getTodayStr);
+  const [historyEndDate, setHistoryEndDate] = useState<string>(getTodayStr);
+  const [historySearchQuery, setHistorySearchQuery] = useState('');
+
+  // 2. PHÂN TRANG (PAGINATION) - Giới hạn 50 bản ghi/trang để triệt tiêu tải dồn DOM và tối ưu trải nghiệm
+  const [historyPage, setHistoryPage] = useState<number>(1);
+  const [historyPageSize, setHistoryPageSize] = useState<number>(50);
+
+  const applyHistoryPreset = (preset: 'today' | '3days' | '7days' | '35days' | 'all') => {
+    setHistoryPreset(preset);
+    setHistoryPage(1);
+    const today = getTodayStr();
+    if (preset === 'all') {
+      setHistoryStartDate('');
+      setHistoryEndDate('');
+      return;
+    }
+    setHistoryEndDate(today);
+    if (preset === 'today') {
+      setHistoryStartDate(today);
+    } else if (preset === '3days') {
+      setHistoryStartDate(getDaysAgoStr(2));
+    } else if (preset === '7days') {
+      setHistoryStartDate(getDaysAgoStr(6));
+    } else if (preset === '35days') {
+      setHistoryStartDate(getDaysAgoStr(34));
+    }
+  };
+
+  // Filter completed delivery records with 5-minute In-Memory RAM TTL Cache
+  const filteredCompletedReqs = React.useMemo(() => {
+    const cacheKey = `${historyStartDate || 'none'}_${historyEndDate || 'none'}_${historySearchQuery.trim().toLowerCase()}_${completedReqs.length}`;
+    const cached = andonHistoryMemoryCache.current.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < ANDON_HISTORY_CACHE_TTL_MS) {
+      return cached.data;
+    }
+
+    const filtered = completedReqs.filter((item) => {
+      const timeStr = item.deliveredAt || item.requestedAt;
+      if (timeStr) {
+        const itemDate = new Date(timeStr);
+        if (!isNaN(itemDate.getTime())) {
+          if (historyStartDate) {
+            const [sYear, sMonth, sDay] = historyStartDate.split('-').map(Number);
+            const start = new Date(sYear, sMonth - 1, sDay, 0, 0, 0, 0);
+            if (itemDate.getTime() < start.getTime()) return false;
+          }
+          if (historyEndDate) {
+            const [eYear, eMonth, eDay] = historyEndDate.split('-').map(Number);
+            const end = new Date(eYear, eMonth - 1, eDay, 23, 59, 59, 999);
+            if (itemDate.getTime() > end.getTime()) return false;
+          }
+        }
+      }
+
+      if (historySearchQuery.trim()) {
+        const q = historySearchQuery.toLowerCase().trim();
+        const match =
+          item.partCode.toLowerCase().includes(q) ||
+          item.partName.toLowerCase().includes(q) ||
+          item.assemblyLine.toLowerCase().includes(q) ||
+          (item.requestedBy && item.requestedBy.toLowerCase().includes(q)) ||
+          (item.deliveredBy && item.deliveredBy.toLowerCase().includes(q)) ||
+          (item.bufferLocation && item.bufferLocation.toLowerCase().includes(q));
+        if (!match) return false;
+      }
+      return true;
+    });
+
+    andonHistoryMemoryCache.current.set(cacheKey, {
+      data: filtered,
+      timestamp: Date.now(),
+    });
+
+    return filtered;
+  }, [completedReqs, historyStartDate, historyEndDate, historySearchQuery]);
+
+  const totalFilteredDeliveredQty = React.useMemo(() => {
+    return filteredCompletedReqs.reduce((sum, r) => sum + (r.requestedQty || 0), 0);
+  }, [filteredCompletedReqs]);
+
+  // Phân trang dữ liệu hiển thị trên bảng
+  const totalHistoryPages = Math.max(1, Math.ceil(filteredCompletedReqs.length / historyPageSize));
+  const paginatedCompletedReqs = React.useMemo(() => {
+    const safePage = Math.min(historyPage, totalHistoryPages);
+    const start = (safePage - 1) * historyPageSize;
+    return filteredCompletedReqs.slice(start, start + historyPageSize);
+  }, [filteredCompletedReqs, historyPage, totalHistoryPages, historyPageSize]);
+
+  const formatVietnamDateTime = (isoString: string) => {
+    if (!isoString) return 'Chưa ghi nhận';
+    try {
+      const d = new Date(isoString);
+      const day = String(d.getDate()).padStart(2, '0');
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const year = d.getFullYear();
+      const hours = String(d.getHours()).padStart(2, '0');
+      const minutes = String(d.getMinutes()).padStart(2, '0');
+      const seconds = String(d.getSeconds()).padStart(2, '0');
+      return `${hours}:${minutes}:${seconds} - ${day}/${month}/${year}`;
+    } catch {
+      return isoString;
+    }
+  };
+
+  const getRelativeTimeString = (isoString: string) => {
+    if (!isoString) return '';
+    const diffMs = new Date().getTime() - new Date(isoString).getTime();
+    const diffMinutes = Math.floor(diffMs / (1000 * 60));
+    if (diffMinutes < 1) return 'Vừa mới gọi';
+    if (diffMinutes < 60) return `Cách đây ${diffMinutes} phút`;
+    const diffHours = Math.floor(diffMinutes / 60);
+    const remMinutes = diffMinutes % 60;
+    if (diffHours < 24) return `Cách đây ${diffHours} giờ ${remMinutes > 0 ? `${remMinutes}p` : ''}`;
+    const diffDays = Math.floor(diffHours / 24);
+    return `Cách đây ${diffDays} ngày`;
+  };
+
+  const isSpecificTab =
+    viewMode === 'andon_request' ||
+    viewMode === 'andon_calling' ||
+    viewMode === 'andon_delivering' ||
+    viewMode === 'andon_history';
+
+  return (
+    <div className="space-y-6">
+      {/* Top Banner */}
+      <div className="bg-gradient-to-r from-amber-700 via-orange-800 to-rose-900 text-white rounded-3xl p-6 shadow-xl relative overflow-hidden">
+        <div className="absolute top-0 right-0 -mt-8 -mr-8 w-48 h-48 bg-white/10 rounded-full blur-2xl pointer-events-none" />
+        <div className="relative z-10 flex flex-wrap items-center justify-between gap-4">
+          <div className="space-y-1">
+            <div className="inline-flex items-center space-x-2 bg-amber-500/30 border border-amber-300/30 text-amber-200 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider">
+              <BellRing className="w-3.5 h-3.5 text-amber-300 animate-pulse" />
+              <span>ANDON MATERIAL CALL & DELIVERY SYSTEM</span>
+            </div>
+            <h1 className="text-xl sm:text-2xl font-black text-white">
+              {viewMode === 'andon_request' && '1. Sản Xuất Gọi Hàng (Andon Call)'}
+              {viewMode === 'andon_calling' && '2. Đơn Yêu Cầu Đang Gọi (Chờ Nhận Giao)'}
+              {viewMode === 'andon_delivering' && '3. Đang Trên Đường Vận Chuyển (In Transit)'}
+              {viewMode === 'andon_history' && '4. Lịch Sử Giao Cấp Hàng (Andon)'}
+              {(!isSpecificTab) && 'Gọi Hàng & Giao Hàng Dây Chuyền (Andon Call)'}
+            </h1>
+            <p className="text-amber-100 text-xs sm:text-sm max-w-2xl">
+              Hệ thống tín hiệu Andon thời gian thực: Dây chuyền tìm chọn mã linh kiện & số lượng cần gọi, bộ phận Logistics tự động định vị vị trí kệ Outbuffer cấp hàng.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2.5">
+            <button
+              type="button"
+              onClick={handleSyncFromCloud}
+              disabled={isPullingCloud}
+              className="px-4 py-2.5 bg-white/20 hover:bg-white/30 active:scale-95 text-white font-extrabold rounded-2xl border border-white/30 shadow-xs transition-all cursor-pointer flex items-center space-x-2 text-xs"
+              title="Kéo toàn bộ đơn hàng và đồng bộ số tồn kệ từ Supabase Cloud"
+            >
+              <RotateCcw className={`w-4 h-4 ${isPullingCloud ? 'animate-spin' : ''}`} />
+              <span>{isPullingCloud ? 'Đang đồng bộ...' : 'Đồng Bộ Supabase Cloud'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleManualRefreshStock}
+              disabled={isPullingCloud}
+              className="px-4 py-2.5 bg-emerald-600/90 hover:bg-emerald-600 active:scale-95 text-white font-extrabold rounded-2xl border border-emerald-400/40 shadow-xs transition-all cursor-pointer flex items-center space-x-2 text-xs"
+              title="Bấm để làm mới lại số lượng tồn trên kệ Outbuffer (Thao tác thủ công theo yêu cầu)"
+            >
+              <RefreshCw className={`w-4 h-4 text-emerald-200 ${isPullingCloud ? 'animate-spin' : ''}`} />
+              <span>{isPullingCloud ? 'Đang tải tồn...' : 'Làm Mới Tồn Kệ'}</span>
+            </button>
+
+            <div className="bg-white/10 backdrop-blur-md border border-white/20 p-3 sm:p-4 rounded-2xl flex items-center space-x-3">
+              <div className="p-2 sm:p-2.5 bg-amber-400 text-amber-950 rounded-xl font-black">
+                <BellRing className="w-5 h-5 sm:w-6 sm:h-6 animate-bounce" />
+              </div>
+              <div>
+                <span className="text-[10px] text-amber-200 font-bold uppercase block">Tín Hiệu Đang Gọi</span>
+                <span className="text-xl sm:text-2xl font-black text-white">{callingReqs.length} Yêu Cầu</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Message Feedback */}
+      {message && (
+        <div
+          className={`p-4 rounded-2xl border flex items-center justify-between animate-in fade-in ${
+            message.type === 'success'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              : 'bg-rose-50 border-rose-200 text-rose-800'
+          }`}
+        >
+          <div className="flex items-center space-x-3">
+            {message.type === 'success' ? (
+              <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+            ) : (
+              <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0" />
+            )}
+            <span className="font-semibold text-xs sm:text-sm">{message.text}</span>
+          </div>
+          <button onClick={() => setMessage(null)} className="text-xs font-bold underline hover:no-underline cursor-pointer">
+            Đóng
+          </button>
+        </div>
+      )}
+
+      {/* Main Container */}
+      <div className="bg-white rounded-3xl border border-slate-200 shadow-xs overflow-hidden">
+        {/* SECTION: ĐƠN YÊU CẦU ĐANG GỌI */}
+        {effectiveTab === 'calling' && (
+          <div className="p-4 sm:p-6 space-y-6">
+            {/* Active Delivering Staff Picker */}
+            <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center space-x-2 text-amber-900 font-bold text-xs">
+                <User className="w-4 h-4 text-amber-700" />
+                <span>Nhân Viên Logistics / Thủ Kho Nhận Giao Hàng:</span>
+              </div>
+              <select
+                value={delivererName}
+                onChange={(e) => setDelivererName(e.target.value)}
+                className="px-3.5 py-1.5 bg-white border border-amber-300 rounded-xl font-bold text-slate-900 text-xs focus:ring-2 focus:ring-amber-500 shadow-2xs"
+              >
+                {currentUser && (
+                  <option value={`${currentUser.fullName} (${currentUser.roleTitle || currentUser.username})`}>
+                    {currentUser.fullName} ({currentUser.roleTitle || currentUser.username}) [Đang đăng nhập]
+                  </option>
+                )}
+                {settings.staffList && settings.staffList.length > 0 ? (
+                  settings.staffList
+                    .filter((s) => !currentUser || !s.includes(currentUser.fullName))
+                    .map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))
+                ) : (
+                  !currentUser && (
+                    <option value="Lê Hoàng Nam (Thủ Kho Logistics)">Lê Hoàng Nam (Thủ Kho Logistics)</option>
+                  )
+                )}
+              </select>
+            </div>
+
+            {/* Calling Requests List */}
+            <div className="space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-200 pb-2 gap-1">
+                <div>
+                  <h3 className="font-extrabold text-sm text-slate-900 flex items-center space-x-2">
+                    <Bell className="w-4 h-4 text-red-500 animate-pulse" />
+                    <span>Danh Sách Đơn Yêu Cầu Đang Phát Tín Hiệu Gọi Hàng (Calling Requests)</span>
+                  </h3>
+                  <p className="text-[11px] text-slate-500 italic">
+                    * Tự động ưu tiên FIFO: Yêu cầu gọi trước xếp trên cùng để xử lý cấp hàng trước
+                  </p>
+                </div>
+                <div className="flex items-center space-x-2 self-start sm:self-auto">
+                  {isAdmin && callingReqs.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleAdminClearAllCalling}
+                      className="px-3 py-1 bg-rose-700 hover:bg-rose-800 text-white font-bold text-xs rounded-xl shadow-2xs transition-all cursor-pointer flex items-center space-x-1"
+                      title="Admin: Dọn sạch vĩnh viễn toàn bộ đơn đang gọi rác/thử nghiệm"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Xóa Tất Cả ({callingReqs.length} Đơn)</span>
+                    </button>
+                  )}
+                  <span className="text-xs font-bold text-red-600 bg-red-50 px-2.5 py-0.5 rounded-full border border-red-200">
+                    {callingReqs.length} Đơn
+                  </span>
+                </div>
+              </div>
+
+              {callingReqs.length === 0 ? (
+                <div className="p-8 text-center text-slate-400 bg-slate-50 rounded-2xl border border-dashed border-slate-200 italic text-xs">
+                  Hiện không có yêu cầu gọi hàng mới nào từ Dây Chuyền.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {callingReqs.map((req, idx) => (
+                    <div
+                      key={req.requestId}
+                      className="p-5 bg-white border-2 border-red-200 rounded-2xl shadow-xs hover:shadow-md transition-all space-y-3 relative overflow-hidden"
+                    >
+                      {/* Priority Badge */}
+                      <div className="flex items-center justify-between gap-2 pb-2 border-b border-red-100">
+                        <span
+                          className={`px-2.5 py-1 rounded-xl text-[10px] font-black uppercase tracking-wider shadow-xs flex items-center space-x-1 ${
+                            idx === 0
+                              ? 'bg-red-600 text-white ring-2 ring-red-400 animate-pulse'
+                              : idx === 1
+                              ? 'bg-amber-500 text-slate-950 font-black'
+                              : 'bg-slate-700 text-white font-bold'
+                          }`}
+                        >
+                          <Zap className="w-3 h-3" />
+                          <span>
+                            {idx === 0 ? 'ƯU TIÊN #1 (GỌI ĐẦU TIÊN)' : `ƯU TIÊN #${idx + 1}`}
+                          </span>
+                        </span>
+                        {req.isDirectKitting ? (
+                          <span className="px-2.5 py-0.5 bg-amber-100 text-amber-900 text-[10px] font-black uppercase rounded-md tracking-wide">
+                            📦 BÓC TÁCH KITTING
+                          </span>
+                        ) : (
+                          <span className="px-2.5 py-0.5 bg-red-100 text-red-900 text-[10px] font-black uppercase rounded-md tracking-wide">
+                            ⚡ OUTBUFFER
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Required Time Highlight Badge */}
+                      <div className="p-2.5 bg-gradient-to-r from-amber-50 to-orange-50 border-2 border-amber-300 rounded-xl flex items-center justify-between gap-2 text-xs font-black text-amber-950 shadow-2xs">
+                        <span className="flex items-center space-x-1.5 text-amber-900">
+                          <Clock className="w-4 h-4 text-rose-600 shrink-0 animate-pulse" />
+                          <span>⏰ GIỜ CẦN CHÍNH XÁC:</span>
+                        </span>
+                        <span className="text-sm font-mono font-black text-rose-950 bg-rose-100 px-3 py-0.5 rounded-lg border border-rose-300 shadow-2xs">
+                          {req.requiredTime || 'Càng sớm càng tốt'}
+                        </span>
+                      </div>
+
+                      {/* Call Timestamp Highlight */}
+                      <div className="p-2.5 bg-rose-50/90 border border-rose-200 rounded-xl flex flex-wrap items-center justify-between gap-2 text-xs">
+                        <div className="flex items-center space-x-2 text-slate-800">
+                          <Clock className="w-4 h-4 text-red-600 shrink-0 animate-spin-slow" />
+                          <span>
+                            Ngày giờ gọi: <strong className="font-mono font-extrabold text-slate-900">{formatVietnamDateTime(req.requestedAt)}</strong>
+                          </span>
+                        </div>
+                        <span className="text-[11px] font-extrabold text-red-700 bg-white px-2 py-0.5 rounded-md border border-red-200">
+                          ⏱ {getRelativeTimeString(req.requestedAt)}
+                        </span>
+                      </div>
+
+                      <div className="space-y-1.5 pt-1">
+                        <span className="text-amber-900 font-bold text-xs block">
+                          📍 Nơi Nhận: <strong className="text-slate-900 text-sm font-extrabold">{req.assemblyLine}</strong>
+                        </span>
+
+                        {/* PART NAME & PROMINENT LARGE QUANTITY BOX */}
+                        <div className="flex items-start justify-between gap-3 p-3 bg-slate-50 border border-slate-200 rounded-2xl">
+                          <div className="flex-1 min-w-0">
+                            <h4 className="text-base sm:text-lg font-black text-slate-900 leading-snug">
+                              {req.partName}
+                            </h4>
+                            <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                              <span className="text-[11px] font-bold text-slate-500">Mã LK:</span>
+                              <span className="font-mono font-black text-purple-800 text-xs bg-purple-50 border border-purple-200 px-2 py-0.5 rounded-lg inline-block">
+                                {req.partCode}
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Số lượng hiển thị to ngang bằng cỡ chữ tên linh kiện */}
+                          <div className="shrink-0 bg-emerald-600 text-white rounded-xl px-3.5 py-2 shadow-xs flex flex-col items-center sm:items-end justify-center min-w-[110px]">
+                            <span className="text-[9px] font-black uppercase tracking-wider text-emerald-100">
+                              SỐ LƯỢNG:
+                            </span>
+                            <div className="flex items-baseline space-x-1 mt-0.5">
+                              <span className="text-xl sm:text-2xl font-black font-mono leading-none tracking-tight">
+                                {req.requestedQty.toLocaleString('vi-VN')}
+                              </span>
+                              <span className="text-xs sm:text-sm font-black text-emerald-100 uppercase">
+                                {req.unit}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {req.isDirectKitting || req.bufferLocation.includes('KITTING') ? (
+                        <div className="p-3 bg-amber-50 border border-amber-300 rounded-xl text-xs space-y-1.5">
+                          <span className="font-extrabold text-amber-900 flex items-center space-x-1 uppercase text-[10px]">
+                            <Zap className="w-3.5 h-3.5 text-amber-600" />
+                            <span>LỘ TRÌNH KITTING CROSS-DOCKING:</span>
+                          </span>
+                          <p className="font-bold text-slate-800 text-xs leading-relaxed">
+                            1. Đến Khu Bóc Tách Kitting lấy <strong className="text-base font-black text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-lg border border-emerald-300 font-mono inline-block">[{req.requestedQty} {req.unit}]</strong> <br />
+                            2. Giao trực tiếp tới <strong className="text-slate-900 font-extrabold text-sm">[{req.assemblyLine}]</strong>
+                          </p>
+                        </div>
+                      ) : (
+                        (() => {
+                          const shelfBuf = andonBuffers.find((b) => b.locationId === req.bufferLocation);
+                          return (
+                            <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-xs space-y-1.5">
+                              <span className="font-extrabold text-blue-900 block uppercase text-[10px]">LỘ TRÌNH LẤY HÀNG OUTBUFFER:</span>
+                              <p className="font-bold text-slate-800 text-xs leading-relaxed">
+                                1. Đến Kệ <strong className="text-blue-700 font-mono font-black text-sm">[{req.bufferLocation}]</strong>
+                                {shelfBuf?.modelName && (
+                                  <span className="ml-1 text-blue-900 font-extrabold">
+                                    [Model: {shelfBuf.modelName}]
+                                  </span>
+                                )}
+                                {shelfBuf?.description && (
+                                  <span className="ml-1 text-slate-600 font-medium">
+                                    ({shelfBuf.description})
+                                  </span>
+                                )} lấy <strong className="text-base font-black text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-lg border border-emerald-300 font-mono inline-block">[{req.requestedQty} {req.unit}]</strong> <br />
+                                2. Giao tới <strong className="text-slate-900 font-black text-sm">[{req.assemblyLine}]</strong>
+                              </p>
+                            </div>
+                          );
+                        })()
+                      )}
+
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500 pt-2 border-t border-slate-100">
+                        <span>Người gọi: {req.requestedBy}</span>
+                        <div className="flex items-center space-x-2">
+                          {isAdmin && (
+                            <button
+                              type="button"
+                              onClick={() => handleAdminDeleteRequest(req.requestId)}
+                              className="px-2.5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl shadow-2xs transition-all cursor-pointer flex items-center space-x-1 text-xs"
+                              title="Admin: Xóa đơn gọi hàng lỡ bấm nhầm"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span>Xóa Đơn (Admin)</span>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            disabled={syncingRequestIds.includes(req.requestId)}
+                            onClick={() => handleStartDelivery(req.requestId)}
+                            className="px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-60 disabled:cursor-wait text-white font-bold rounded-xl shadow-xs transition-all cursor-pointer flex items-center space-x-1.5"
+                          >
+                            <Truck className="w-3 h-3.5" />
+                            <span>
+                              {syncingRequestIds.includes(req.requestId) ? 'ĐANG ĐỒNG BỘ...' : 'NHẬN ĐƠN DELIVERY'}
+                            </span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* SECTION: ĐANG TRÊN ĐƯỜNG VẬN CHUYỂN */}
+        {effectiveTab === 'delivering' && (
+          <div className="p-4 sm:p-6 space-y-6">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+              <div>
+                <h3 className="font-extrabold text-sm sm:text-base text-slate-900 flex items-center space-x-2">
+                  <Truck className="w-5 h-5 text-blue-600" />
+                  <span>Danh Sách Đơn Đang Trên Đường Vận Chuyển (In Transit)</span>
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Các đơn hàng đã được nhân viên giao hàng tiếp nhận và đang trên đường vận chuyển tới dây chuyền.
+                </p>
+              </div>
+              <span className="text-xs font-bold text-blue-600 bg-blue-50 px-3 py-1 rounded-full border border-blue-200">
+                {deliveringReqs.length} Đơn
+              </span>
+            </div>
+
+            {deliveringReqs.length === 0 ? (
+              <div className="p-12 text-center text-slate-400 bg-slate-50 rounded-2xl border border-dashed border-slate-200 italic text-xs">
+                Hiện chưa có đơn hàng nào đang trên đường vận chuyển.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {deliveringReqs.map((req) => (
+                  <div
+                    key={req.requestId}
+                    className="p-5 bg-white border-2 border-blue-200 rounded-2xl shadow-xs space-y-3"
+                  >
+                    <div className="flex items-center justify-between border-b border-blue-100 pb-2">
+                      <span className="px-2.5 py-0.5 bg-blue-100 text-blue-800 font-black text-[10px] rounded-md uppercase">
+                        🚚 ĐANG TRÊN ĐƯỜNG GIAO HÀNG
+                      </span>
+                      <span className="text-slate-600 text-xs font-bold">
+                        Giao bởi: <strong className="text-slate-900">{req.deliveredBy || delivererName}</strong>
+                      </span>
+                    </div>
+
+                    {/* PART NAME & PROMINENT LARGE QUANTITY BOX */}
+                    <div className="flex items-start justify-between gap-3 p-3 bg-slate-50 border border-slate-200 rounded-2xl">
+                      <div className="flex-1 min-w-0">
+                        <h4 className="text-base sm:text-lg font-black text-slate-900 leading-snug">
+                          {req.partName}
+                        </h4>
+                        <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                          <span className="text-[11px] font-bold text-slate-500">Mã LK:</span>
+                          <span className="font-mono font-black text-purple-800 text-xs bg-purple-50 border border-purple-200 px-2 py-0.5 rounded-lg inline-block">
+                            {req.partCode}
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-600 mt-1">
+                          Kệ lấy: <strong className="text-blue-700 font-mono font-extrabold">{req.bufferLocation}</strong>
+                        </p>
+                      </div>
+
+                      {/* Số lượng giao to ngang bằng cỡ chữ tên linh kiện */}
+                      <div className="shrink-0 bg-blue-600 text-white rounded-xl px-3.5 py-2 shadow-xs flex flex-col items-center sm:items-end justify-center min-w-[110px]">
+                        <span className="text-[9px] font-black uppercase tracking-wider text-blue-100">
+                          SỐ LƯỢNG GIAO:
+                        </span>
+                        <div className="flex items-baseline space-x-1 mt-0.5">
+                          <span className="text-xl sm:text-2xl font-black font-mono leading-none tracking-tight">
+                            {req.requestedQty.toLocaleString('vi-VN')}
+                          </span>
+                          <span className="text-xs sm:text-sm font-black text-blue-100 uppercase">
+                            {req.unit}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="p-3 bg-blue-50/80 border border-blue-100 rounded-xl text-xs space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-blue-900">Nơi nhận hàng:</span>
+                        {req.requiredTime && (
+                          <span className="text-[11px] font-mono font-black text-rose-800 bg-rose-100 px-2 py-0.5 rounded-md border border-rose-300">
+                            ⏰ Cần lúc: {req.requiredTime}
+                          </span>
+                        )}
+                      </div>
+                      <p className="font-extrabold text-slate-900 text-sm">{req.assemblyLine}</p>
+                      <p className="text-[11px] text-slate-500">Người yêu cầu: {req.requestedBy}</p>
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={syncingRequestIds.includes(req.requestId)}
+                      onClick={() => handleCompleteDelivery(req.requestId)}
+                      className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 disabled:cursor-wait text-white font-extrabold rounded-xl shadow-md transition-all cursor-pointer flex items-center justify-center space-x-2 text-xs"
+                    >
+                      <Check className="w-4 h-4" />
+                      <span>
+                        {syncingRequestIds.includes(req.requestId)
+                          ? 'ĐANG ĐỒNG BỘ SUPABASE...'
+                          : 'XÁC NHẬN ĐÃ GIAO HÀNG TỚI BÀN MÁY'}
+                      </span>
+                    </button>
+
+                    {isAdmin && (
+                      <div className="pt-2 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs bg-slate-50 p-2 rounded-xl">
+                        <span className="font-extrabold text-slate-700 flex items-center space-x-1">
+                          <ShieldAlert className="w-3.5 h-3.5 text-blue-600" />
+                          <span>Admin Quản Lý:</span>
+                        </span>
+                        <div className="flex items-center space-x-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleAdminRollbackRequest(req.requestId, 'CALLING')}
+                            className="px-2.5 py-1.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-extrabold rounded-lg cursor-pointer flex items-center space-x-1 text-[11px] shadow-2xs"
+                            title="Rollback về trạng thái 1. Đang Gọi Hàng"
+                          >
+                            <RotateCcw className="w-3 h-3" />
+                            <span>Rollback Về Gọi Hàng</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleAdminDeleteRequest(req.requestId)}
+                            className="px-2.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-lg cursor-pointer flex items-center space-x-1 text-[11px] shadow-2xs"
+                            title="Xóa đơn vận chuyển này"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            <span>Xóa Đơn</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* SECTION: SẢN XUẤT GỌI HÀNG (ANDON) */}
+        {effectiveTab === 'request' && (
+          <div className="p-2 sm:p-6 max-w-2xl mx-auto space-y-4 w-full min-w-0">
+            <div className="p-3.5 sm:p-4 bg-amber-50 border border-amber-200 rounded-2xl flex items-center space-x-3 text-amber-900">
+              <Zap className="w-5 h-5 sm:w-6 sm:h-6 text-amber-600 shrink-0" />
+              <div>
+                <h3 className="font-bold text-xs sm:text-sm">Chế Độ Sản Xuất Bấm Gọi Hàng (Andon Call)</h3>
+                <p className="text-[11px] sm:text-xs text-amber-800">
+                  Chọn mã/tên linh kiện cần gọi và nhập số lượng, hệ thống tự động xác định vị trí kệ Outbuffer khả dụng tốt nhất.
+                </p>
+              </div>
+            </div>
+
+            <form onSubmit={handleCreateCallRequest} className="p-3.5 sm:p-6 bg-white border border-slate-200 rounded-2xl sm:rounded-3xl space-y-4 text-xs text-slate-800 shadow-xs w-full min-w-0">
+              {/* QUÉT MÃ QR PHIẾU THÔNG TIN / THẺ THÙNG (TỰ ĐỘNG LẤY TÊN, MÃ, SỐ LƯỢNG QUY CÁCH) */}
+              <div className="p-3.5 sm:p-4 bg-blue-50/80 border-2 border-blue-200 rounded-2xl space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label className="font-extrabold text-blue-900 text-xs flex items-center space-x-2">
+                    <QrCode className="w-4 h-4 text-blue-700 animate-pulse shrink-0" />
+                    <span>QUÉT MÃ QR PHIẾU THÔNG TIN / THẺ THÙNG (TỰ ĐỘNG CẤP TÊN, MÃ, SL QUY CÁCH)</span>
+                  </label>
+                  <div className="flex items-center space-x-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsAndonCameraScanning(!isAndonCameraScanning)}
+                      className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-[11px] font-bold shadow-2xs flex items-center space-x-1 cursor-pointer"
+                    >
+                      <QrCode className="w-3.5 h-3.5" />
+                      <span>{isAndonCameraScanning ? 'Ẩn Camera' : 'Quét Camera QR'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {isAndonCameraScanning && (
+                  <SmoothCameraScanner
+                    onScanSuccess={(code) => {
+                      setIsAndonCameraScanning(false);
+                      setAndonQrInputText(code);
+                      handleParseAndonQrPayload(code);
+                    }}
+                    onClose={() => setIsAndonCameraScanning(false)}
+                    placeholderText="Căn mã QR Phiếu Thông Tin / Thẻ Thùng vào giữa khung hình camera..."
+                    autoCloseOnScan={true}
+                  />
+                )}
+
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <input
+                    type="text"
+                    value={andonQrInputText}
+                    onChange={(e) => setAndonQrInputText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleParseAndonQrPayload(andonQrInputText);
+                        setAndonQrInputText('');
+                      }
+                    }}
+                    placeholder="Quét hoặc dán chuỗi QR code Phiếu Thông Tin / Thẻ Thùng..."
+                    className="w-full flex-1 px-3.5 py-2 bg-white border border-blue-300 rounded-xl font-mono text-xs font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-hidden"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleParseAndonQrPayload(andonQrInputText);
+                      setAndonQrInputText('');
+                    }}
+                    className="w-full sm:w-auto px-4 py-2 bg-blue-800 hover:bg-blue-900 text-white rounded-xl font-extrabold text-xs cursor-pointer shadow-2xs text-center"
+                  >
+                    Xác Nhận Quét
+                  </button>
+                </div>
+
+                {andonScanMessage && (
+                  <div className="p-2.5 bg-emerald-100 border border-emerald-300 rounded-xl text-emerald-950 font-bold text-xs flex items-center justify-between">
+                    <span>{andonScanMessage}</span>
+                    <button
+                      type="button"
+                      onClick={() => setAndonScanMessage('')}
+                      className="text-emerald-800 hover:underline text-[10px] font-extrabold"
+                    >
+                      Đóng
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <div className="pt-2 text-center">
+                <button
+                  type="button"
+                  onClick={() => setShowManualForm(!showManualForm)}
+                  className="w-full sm:w-auto px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-extrabold text-xs rounded-xl transition-all cursor-pointer inline-flex items-center justify-center space-x-2 border border-slate-300 shadow-2xs"
+                >
+                  <SettingsIcon className="w-4 h-4 text-amber-700" />
+                  <span>{showManualForm ? 'Ẩn Form Chọn Linh Kiện Thủ Công' : '📋 Hiện Form Chọn Linh Kiện Thủ Công (Không Quét QR)'}</span>
+                </button>
+              </div>
+
+              {showManualForm && (
+                <div className="space-y-4 pt-2 border-t border-slate-200 animate-in fade-in w-full min-w-0">
+                  {/* 1. Dây Chuyền / Bàn Máy Yêu Cầu Cấp Hàng - Default DCLR */}
+                  <div className="w-full min-w-0">
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block font-bold text-slate-800 text-xs">
+                        1. Dây Chuyền / Bàn Máy Yêu Cầu Cấp Hàng <span className="text-rose-500">*</span>
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => setIsCustomLineMode(!isCustomLineMode)}
+                        className="text-[11px] font-bold text-amber-700 hover:text-amber-900 underline flex items-center space-x-1 cursor-pointer"
+                      >
+                        <SettingsIcon className="w-3.5 h-3.5" />
+                        <span>{isCustomLineMode ? 'Mặc Định DCLR' : 'Sửa Chi Tiết'}</span>
+                      </button>
+                    </div>
+
+                    {isCustomLineMode ? (
+                      <div className="space-y-2">
+                        <input
+                          type="text"
+                          value={assemblyLine}
+                          onChange={(e) => setAssemblyLine(e.target.value)}
+                          placeholder="Nhập thủ công vị trí / bàn máy / dây chuyền..."
+                          className="w-full px-3.5 py-2.5 bg-white border-2 border-amber-400 rounded-xl font-extrabold text-slate-900 text-sm focus:ring-2 focus:ring-amber-500 outline-hidden"
+                        />
+                        <div className="flex flex-wrap gap-1.5 items-center">
+                          <span className="text-[10px] text-slate-500 font-bold">Chọn nhanh:</span>
+                          <button
+                            type="button"
+                            onClick={() => setAssemblyLine('DCLR')}
+                            className="px-2 py-0.5 bg-slate-100 hover:bg-amber-100 border border-slate-300 rounded text-[11px] font-bold cursor-pointer"
+                          >
+                            DCLR (Ghi chung)
+                          </button>
+                          {assemblyLinesList.map((line) => (
+                            <button
+                              key={line}
+                              type="button"
+                              onClick={() => setAssemblyLine(line)}
+                              className="px-2 py-0.5 bg-slate-100 hover:bg-amber-100 border border-slate-300 rounded text-[11px] font-bold cursor-pointer"
+                            >
+                              {line}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                        <input
+                          type="text"
+                          value={assemblyLine}
+                          onChange={(e) => setAssemblyLine(e.target.value)}
+                          className="w-full flex-1 px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl font-extrabold text-amber-900 text-sm focus:ring-2 focus:ring-amber-500 outline-hidden"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setIsCustomLineMode(true)}
+                          className="w-full sm:w-auto px-3.5 py-2.5 bg-amber-100 hover:bg-amber-200 text-amber-900 rounded-xl text-xs font-extrabold shrink-0 cursor-pointer text-center"
+                        >
+                          ✏️ Sửa Chi Tiết
+                        </button>
+                      </div>
+                    )}
+                    <p className="text-[10px] text-slate-400 mt-1 italic">
+                      * Mặc định là DCLR. Bấm "Sửa Chi Tiết" nếu muốn ghi thủ công tên bàn máy / dây chuyền cụ thể.
+                    </p>
+                  </div>
+
+                  {/* Searchable Select Part Code & Name */}
+                  <div className="w-full min-w-0">
+                    <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                      <label className="block font-bold text-slate-800 text-xs sm:text-sm">
+                        2. Chọn Mã & Tên Linh Kiện Cần Gọi (Chỉ gọi linh kiện trong Danh Sách Chờ Bóc Tách hoặc Kệ Outbuffer) <span className="text-rose-500">*</span>
+                      </label>
+                      <button
+                        type="button"
+                        onClick={handleManualRefreshStock}
+                        disabled={isPullingCloud}
+                        className="inline-flex items-center space-x-1 px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg text-[11px] font-bold cursor-pointer transition-colors shadow-2xs shrink-0 active:scale-95"
+                        title="Bấm để làm mới số tồn mới nhất trên kệ Outbuffer"
+                      >
+                        <RefreshCw className={`w-3 h-3 text-emerald-600 ${isPullingCloud ? 'animate-spin' : ''}`} />
+                        <span>Làm mới số tồn</span>
+                      </button>
+                    </div>
+                    {partSelectOptions.length === 0 ? (
+                      <div className="p-4 bg-amber-50 border-2 border-amber-300 rounded-2xl text-xs text-amber-900 space-y-2">
+                        <p className="font-extrabold flex items-center space-x-2 text-sm text-amber-950">
+                          <AlertCircle className="w-5 h-5 text-amber-600 shrink-0" />
+                          <span>Chưa Có Linh Kiện Nào Được Xuất Kho Thô Hoặc Tồn Kệ Outbuffer</span>
+                        </p>
+                        <p className="text-slate-700 leading-relaxed font-medium">
+                          Theo quy trình sản xuất, chỉ những linh kiện <strong>đã được xuất kho thô (nằm trong Danh Sách Chờ Bóc Tách)</strong> hoặc <strong>đã có sẵn trên kệ Outbuffer</strong> mới được phép phát tín hiệu gọi cấp hàng.
+                        </p>
+                        <p className="text-amber-900 font-bold italic">
+                          👉 Vui lòng tạo phiếu Xuất Kho Thô từ Kho Tổng trước!
+                        </p>
+                      </div>
+                    ) : (
+                      <SearchableSelect
+                        options={partSelectOptions}
+                        value={selectedPartCode}
+                        onChange={(val) => {
+                          setSelectedPartCode(val);
+                          const mTag = getMasterTagForPart(val);
+                          if (mTag && mTag.standardQty > 0) {
+                            setRequestedQty(mTag.standardQty);
+                            setProposedMasterQty(mTag.standardQty);
+                          } else {
+                            const info = bufferPartsMap.get(val);
+                            if (info && info.availableBuffers.length > 0) {
+                              setRequestedQty(Math.min(10, info.availableBuffers[0].currentStockQty));
+                            } else {
+                              setRequestedQty(10);
+                            }
+                            setProposedMasterQty(null);
+                          }
+                        }}
+                        placeholder="Gõ mã hoặc tên linh kiện để tìm kiếm..."
+                        required
+                        allowCustom={false}
+                        icon={<Search className="w-4 h-4" />}
+                      />
+                    )}
+                  </div>
+
+                  {/* Auto-detected Buffer Shelf / Direct Kitting Information Box */}
+                  {selectedPartCode && (
+                    isDirectKitting ? (
+                      <div className="p-4 bg-amber-50 border-2 border-amber-300 rounded-2xl text-xs space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="font-extrabold text-amber-900 flex items-center space-x-1.5">
+                            <Package className="w-4 h-4 text-amber-600" />
+                            <span>Trạng Thái Outbuffer:</span>
+                          </span>
+                          <span className="font-extrabold text-[11px] px-3 py-1 bg-amber-500 text-slate-950 rounded-xl shadow-xs uppercase">
+                            📦 CHƯA CÓ TRÊN KỆ OUTBUFFER
+                          </span>
+                        </div>
+                        <p className="text-slate-800 font-bold">
+                          Tên LK: <strong className="text-slate-900">{partName || selectedPartCode}</strong>
+                        </p>
+                        <div className="p-3 bg-amber-100/90 border border-amber-200 rounded-xl text-amber-950 space-y-1">
+                          <p className="flex items-center space-x-1.5 font-extrabold text-amber-900 text-xs">
+                            <AlertCircle className="w-4 h-4 text-amber-700 shrink-0" />
+                            <span>Quy Trình: Bóc Tách Kitting & Giao Thẳng (Cross-Docking)</span>
+                          </p>
+                          <p className="text-[11px] text-amber-900 leading-relaxed font-medium">
+                            Linh kiện chưa sẵn sàng trên kệ Outbuffer. Tín hiệu bấm gọi này sẽ thông báo cho bộ phận Logistics <strong>thực hiện Bóc Tách tại Khu Kitting và giao TRỰC TIẾP tới {assemblyLine}</strong> mà không gợi ý vị trí kệ lấy ảo!
+                          </p>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl text-xs space-y-3">
+                        <div className="space-y-1.5">
+                          <label className="block font-extrabold text-emerald-950">
+                            Chọn Kệ Outbuffer Lấy Hàng (Ưu tiên FIFO):
+                          </label>
+                          <select
+                            value={targetBufferLocation}
+                            onChange={(e) => setSelectedPickShelf(e.target.value)}
+                            className="w-full px-3.5 py-2.5 bg-white border border-emerald-300 rounded-xl font-bold text-slate-900 text-xs focus:ring-2 focus:ring-emerald-500 shadow-xs"
+                          >
+                            {availableBuffersForPart.map((b, idx) => (
+                              <option key={b.locationId} value={b.locationId}>
+                                [{b.locationId}] {b.modelName ? ` • Model: ${b.modelName}` : ''} {b.description ? ` (${b.description})` : ''} — Tồn: {b.currentStockQty} {unit} {idx === 0 ? ' ⭐ (Ưu tiên FIFO)' : ''}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        {(() => {
+                          const curBuf = availableBuffersForPart.find((b) => b.locationId === targetBufferLocation) || availableBuffersForPart[0];
+                          if (!curBuf) return null;
+                          return (
+                            <div className="p-3 bg-white border border-emerald-200/80 rounded-xl space-y-1.5 text-xs shadow-xs">
+                              <div className="flex items-center justify-between font-bold">
+                                <span className="flex items-center space-x-1.5 text-slate-900">
+                                  <MapPin className="w-4 h-4 text-emerald-600" />
+                                  <span>Kệ Đang Chọn: <strong className="font-mono text-emerald-800 font-extrabold">{curBuf.locationId}</strong></span>
+                                </span>
+                                {curBuf.locationId === availableBuffersForPart[0]?.locationId && (
+                                  <span className="px-2 py-0.5 bg-emerald-700 text-white text-[10px] font-black rounded-md uppercase">
+                                    ⭐ Hàng xuất trước (FIFO)
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-2 text-[11px] pt-1">
+                                {curBuf.modelName ? (
+                                  <span className="px-2.5 py-1 bg-blue-50 text-blue-900 border border-blue-200 rounded-lg font-extrabold flex items-center space-x-1">
+                                    <Tag className="w-3.5 h-3.5 text-blue-600" />
+                                    <span>Model Kệ: <strong>{curBuf.modelName}</strong></span>
+                                  </span>
+                                ) : (
+                                  <span className="px-2 py-0.5 bg-slate-100 text-slate-500 rounded-md font-semibold italic border border-slate-200">
+                                    Chưa gán Model
+                                  </span>
+                                )}
+
+                                {curBuf.description && (
+                                  <span className="px-2.5 py-1 bg-slate-50 text-slate-800 border border-slate-200 rounded-lg font-bold">
+                                    📍 Mô tả vị trí: <strong>{curBuf.description}</strong>
+                                  </span>
+                                )}
+
+                                <span className="px-2.5 py-1 bg-emerald-100 text-emerald-950 border border-emerald-300 rounded-lg font-extrabold">
+                                  📦 Tồn khả dụng: <strong>{curBuf.currentStockQty} {unit}</strong>
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    )
+                  )}
+
+                  {/* Requested Quantity */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block font-bold text-slate-800 text-xs sm:text-sm">
+                        3. Số Lượng Cần Gọi ({unit}) <span className="text-rose-500">*</span>
+                      </label>
+                      {proposedMasterQty && (
+                        <span className="text-[11px] font-extrabold text-amber-900 bg-amber-100 border border-amber-300 px-2 py-0.5 rounded-lg flex items-center space-x-1">
+                          <Package className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                          <span>Chuẩn Thẻ Thùng: <strong>{proposedMasterQty.toLocaleString('vi-VN')} {unit}</strong></span>
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        min={1}
+                        value={requestedQty}
+                        onChange={(e) => setRequestedQty(Number(e.target.value))}
+                        required
+                        className="w-full flex-1 px-3.5 py-2.5 bg-white border border-slate-300 rounded-xl font-black text-amber-900 text-sm focus:ring-2 focus:ring-amber-500 outline-hidden"
+                      />
+                      {proposedMasterQty && requestedQty !== proposedMasterQty && (
+                        <button
+                          type="button"
+                          onClick={() => setRequestedQty(proposedMasterQty)}
+                          className="px-3 py-2.5 bg-amber-100 hover:bg-amber-200 border border-amber-300 text-amber-950 rounded-xl text-xs font-bold shrink-0 cursor-pointer transition-colors shadow-2xs"
+                          title={`Khôi phục số lượng theo tiêu chuẩn Thẻ Thùng (${proposedMasterQty})`}
+                        >
+                          Chuẩn Thùng ({proposedMasterQty})
+                        </button>
+                      )}
+                    </div>
+                    {proposedMasterQty && (
+                      <p className="text-[11px] text-amber-800 mt-1 font-semibold flex items-center space-x-1">
+                        <span>💡 Đã tự động đề xuất số lượng theo tiêu chuẩn Thẻ Thùng Master Data: <strong>{proposedMasterQty} {unit}/kiện</strong></span>
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Required Time Input */}
+                  <div className="p-3 bg-rose-50 border-2 border-rose-300 rounded-2xl space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <label className="block font-extrabold text-rose-950 text-xs flex items-center space-x-1.5">
+                        <Clock className="w-4 h-4 text-rose-600 animate-pulse shrink-0" />
+                        <span>4. Giờ Cần Chính Xác Linh Kiện</span> <span className="text-rose-500">*</span>
+                      </label>
+                      <span className="text-[10px] text-rose-700 font-bold bg-white px-2 py-0.5 rounded-md border border-rose-200">
+                        ⏱ Ưu tiên phát hàng
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        type="time"
+                        value={requiredTime}
+                        onChange={(e) => setRequiredTime(e.target.value)}
+                        className="px-3 py-2 bg-white border-2 border-rose-400 rounded-xl font-black text-rose-950 text-sm focus:ring-2 focus:ring-rose-500 outline-hidden shadow-2xs shrink-0"
+                      />
+                      <div className="flex flex-wrap gap-1 items-center">
+                        <span className="text-[10px] text-rose-800 font-bold">Thêm nhanh:</span>
+                        {['15', '30', '45', '60'].map((mins) => (
+                          <button
+                            key={mins}
+                            type="button"
+                            onClick={() => {
+                              const d = new Date();
+                              d.setMinutes(d.getMinutes() + parseInt(mins, 10));
+                              const h = String(d.getHours()).padStart(2, '0');
+                              const m = String(d.getMinutes()).padStart(2, '0');
+                              setRequiredTime(`${h}:${m}`);
+                            }}
+                            className="px-2.5 py-1 bg-rose-200 hover:bg-rose-300 text-rose-950 rounded-lg font-black text-xs cursor-pointer shadow-2xs transition-all active:scale-95"
+                          >
+                            +{mins}p
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Requester Select - Default to Logged in User */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block font-bold text-slate-800">
+                        5. Người Yêu Cầu <span className="text-rose-500">*</span>
+                      </label>
+                      {currentUser && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setRequestedBy(`${currentUser.fullName} (${currentUser.roleTitle || currentUser.username})`)
+                          }
+                          className="text-[11px] font-extrabold text-blue-700 hover:underline flex items-center space-x-1 cursor-pointer"
+                        >
+                          <User className="w-3.5 h-3.5 text-blue-600" />
+                          <span>Đặt theo User Đăng Nhập</span>
+                        </button>
+                      )}
+                    </div>
+                    <input
+                      type="text"
+                      value={requestedBy}
+                      onChange={(e) => setRequestedBy(e.target.value)}
+                      required
+                      className="w-full px-3.5 py-2.5 bg-white border border-slate-300 rounded-xl font-bold text-slate-900 text-sm focus:ring-2 focus:ring-amber-500 outline-hidden"
+                      placeholder="Tên người yêu cầu..."
+                    />
+                    <p className="text-[10px] text-slate-400 mt-1 italic">
+                      * Mặc định theo tài khoản người dùng đang đăng nhập: <strong className="text-slate-700">{defaultRequester}</strong>
+                    </p>
+                  </div>
+
+                  <button
+                    type="submit"
+                    className="w-full py-3 bg-amber-600 hover:bg-amber-700 text-white font-extrabold rounded-2xl shadow-md transition-all cursor-pointer flex items-center justify-center space-x-2 text-sm mt-4"
+                  >
+                    <BellRing className="w-5 h-5 animate-bounce" />
+                    <span>GỬI YÊU CẦU CẤP HÀNG (ANDON SIGNAL)</span>
+                  </button>
+                </div>
+              )}
+            </form>
+          </div>
+        )}
+
+        {/* SECTION: LỊCH SỬ GIAO CẤP HÀNG */}
+        {effectiveTab === 'history' && (
+          <div className="p-4 sm:p-6 space-y-5">
+            {/* Filter Toolbar */}
+            <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center space-x-2">
+                  <div className="p-2 bg-amber-100 text-amber-900 rounded-xl">
+                    <Filter className="w-4 h-4 text-amber-700" />
+                  </div>
+                  <div>
+                    <h4 className="font-extrabold text-xs sm:text-sm text-slate-900">
+                      BỘ LỌC NGÀY LỊCH SỬ GIAO CẤP HÀNG
+                    </h4>
+                    <p className="text-[11px] text-slate-500">
+                      Chỉ hiển thị các đơn hoàn tất giao trong khoảng ngày bạn chọn (Lưu trữ tối đa 35 ngày gần nhất).
+                    </p>
+                  </div>
+                </div>
+
+                {/* Quick presets */}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => applyHistoryPreset('today')}
+                    className={`px-3 py-1.5 rounded-xl font-bold text-xs cursor-pointer transition-all ${
+                      historyPreset === 'today'
+                        ? 'bg-amber-600 text-white shadow-xs'
+                        : 'bg-white text-slate-700 border border-slate-300 hover:bg-slate-100'
+                    }`}
+                  >
+                    📅 Hôm nay
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applyHistoryPreset('3days')}
+                    className={`px-3 py-1.5 rounded-xl font-bold text-xs cursor-pointer transition-all ${
+                      historyPreset === '3days'
+                        ? 'bg-amber-600 text-white shadow-xs'
+                        : 'bg-white text-slate-700 border border-slate-300 hover:bg-slate-100'
+                    }`}
+                  >
+                    3 ngày qua
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applyHistoryPreset('7days')}
+                    className={`px-3 py-1.5 rounded-xl font-bold text-xs cursor-pointer transition-all ${
+                      historyPreset === '7days'
+                        ? 'bg-amber-600 text-white shadow-xs'
+                        : 'bg-white text-slate-700 border border-slate-300 hover:bg-slate-100'
+                    }`}
+                  >
+                    7 ngày qua
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applyHistoryPreset('35days')}
+                    className={`px-3 py-1.5 rounded-xl font-bold text-xs cursor-pointer transition-all ${
+                      historyPreset === '35days'
+                        ? 'bg-amber-600 text-white shadow-xs'
+                        : 'bg-white text-slate-700 border border-slate-300 hover:bg-slate-100'
+                    }`}
+                  >
+                    35 ngày ({completedReqs.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applyHistoryPreset('all')}
+                    className={`px-3 py-1.5 rounded-xl font-bold text-xs cursor-pointer transition-all ${
+                      historyPreset === 'all'
+                        ? 'bg-amber-600 text-white shadow-xs'
+                        : 'bg-white text-slate-700 border border-slate-300 hover:bg-slate-100'
+                    }`}
+                  >
+                    Tất cả ({completedReqs.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSyncFromCloud}
+                    disabled={isPullingCloud}
+                    className="px-3 py-1.5 rounded-xl font-bold text-xs bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 cursor-pointer flex items-center space-x-1 transition-all"
+                    title="Kéo lại toàn bộ lịch sử đơn từ Supabase Cloud"
+                  >
+                    <RotateCcw className={`w-3.5 h-3.5 ${isPullingCloud ? 'animate-spin text-blue-600' : ''}`} />
+                    <span>Kéo Từ Supabase</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Date Inputs & Search Box */}
+              <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 pt-2 border-t border-slate-200">
+                <div className="sm:col-span-3 flex items-center space-x-2">
+                  <span className="text-xs font-bold text-slate-600 shrink-0">Từ ngày:</span>
+                  <input
+                    type="date"
+                    value={historyStartDate}
+                    onChange={(e) => {
+                      setHistoryStartDate(e.target.value);
+                      setHistoryPreset('custom');
+                      setHistoryPage(1);
+                    }}
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-900 focus:ring-2 focus:ring-amber-500 outline-hidden"
+                  />
+                </div>
+
+                <div className="sm:col-span-3 flex items-center space-x-2">
+                  <span className="text-xs font-bold text-slate-600 shrink-0">Đến ngày:</span>
+                  <input
+                    type="date"
+                    value={historyEndDate}
+                    onChange={(e) => {
+                      setHistoryEndDate(e.target.value);
+                      setHistoryPreset('custom');
+                      setHistoryPage(1);
+                    }}
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-900 focus:ring-2 focus:ring-amber-500 outline-hidden"
+                  />
+                </div>
+
+                <div className="sm:col-span-6 relative">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={historySearchQuery}
+                    onChange={(e) => {
+                      setHistorySearchQuery(e.target.value);
+                      setHistoryPage(1);
+                    }}
+                    placeholder="Tìm theo mã LK, tên LK, bàn máy, người gọi, người giao, kệ..."
+                    className="w-full pl-9 pr-8 py-2 bg-white border border-slate-300 rounded-xl text-xs font-medium text-slate-900 focus:ring-2 focus:ring-amber-500 outline-hidden"
+                  />
+                  {historySearchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setHistorySearchQuery('');
+                        setHistoryPage(1);
+                      }}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 text-xs font-bold"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Result Summary Bar */}
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200 text-xs font-bold">
+                <div className="flex items-center space-x-2 text-slate-600">
+                  <span>
+                    Kết quả lọc: <strong className="text-amber-700">{filteredCompletedReqs.length}</strong> / {completedReqs.length} đơn hoàn tất
+                  </span>
+                  {historyStartDate && historyEndDate && (
+                    <span className="bg-amber-100 text-amber-900 px-2 py-0.5 rounded-md text-[11px] font-mono">
+                      {historyStartDate} ➜ {historyEndDate}
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex items-center space-x-3">
+                  <span className="text-amber-900 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg">
+                    Tổng SL Đã Cấp: <strong>{totalFilteredDeliveredQty.toLocaleString()}</strong>
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* History Table */}
+            <div className="overflow-x-auto border border-slate-200 rounded-2xl">
+              <table className="w-full text-left text-xs whitespace-nowrap">
+                <thead className="bg-slate-100 text-slate-700 font-bold uppercase text-[11px] border-b border-slate-200">
+                  <tr>
+                    <th className="p-3 w-10 text-center">STT</th>
+                    <th className="p-3">Thời Gian Hoàn Tất Giao</th>
+                    <th className="p-3 text-center">Giờ Cần LK</th>
+                    <th className="p-3">Bàn Máy Nhận</th>
+                    <th className="p-3">Mã Linh Kiện</th>
+                    <th className="p-3">Tên Linh Kiện</th>
+                    <th className="p-3 text-right font-black text-amber-800">SL Cấp</th>
+                    <th className="p-3">Kệ Buffer Lấy</th>
+                    <th className="p-3">Người Gọi</th>
+                    <th className="p-3">Người Giao Hàng</th>
+                    <th className="p-3 text-center">Trạng Thái</th>
+                    {isAdmin && <th className="p-3 text-center text-rose-700 font-extrabold">Thao Tác Admin</th>}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {filteredCompletedReqs.length === 0 ? (
+                    <tr>
+                      <td colSpan={isAdmin ? 12 : 11} className="p-12 text-center text-slate-400">
+                        <Clock className="w-12 h-12 mx-auto mb-3 text-slate-300" />
+                        <p className="font-extrabold text-slate-700 text-sm">
+                          Không Có Lịch Sử Giao Hàng Trong Khoảng Ngày Đã Chọn
+                        </p>
+                        <p className="text-xs text-slate-400 mt-1 max-w-md mx-auto">
+                          {historyStartDate && historyEndDate ? (
+                            <span>Từ ngày <strong>{historyStartDate}</strong> đến <strong>{historyEndDate}</strong> chưa ghi nhận đơn giao hoàn tất nào.</span>
+                          ) : (
+                            <span>Chưa có dữ liệu lịch sử giao cấp hàng trong hệ thống.</span>
+                          )}
+                        </p>
+                        <div className="mt-3 flex justify-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => applyHistoryPreset('35days')}
+                            className="px-3 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-900 rounded-xl font-bold text-xs cursor-pointer"
+                          >
+                            Xem Toàn Bộ 35 Ngày
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => applyHistoryPreset('today')}
+                            className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl font-bold text-xs cursor-pointer"
+                          >
+                            Về Ngày Hôm Nay
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : (
+                    paginatedCompletedReqs.map((m, idx) => {
+                      const stt = (historyPage - 1) * historyPageSize + idx + 1;
+                      return (
+                        <tr key={m.requestId} className="hover:bg-slate-50 transition-colors">
+                          <td className="p-3 text-center font-bold text-slate-400">{stt}</td>
+                          <td className="p-3 text-slate-600 font-semibold">{formatVietnamDateTime(m.deliveredAt || m.requestedAt)}</td>
+                          <td className="p-3 text-center font-mono font-bold text-rose-700 bg-rose-50/50 rounded-lg">{m.requiredTime || '---'}</td>
+                          <td className="p-3 font-bold text-slate-800">{m.assemblyLine}</td>
+                          <td className="p-3 font-mono font-bold text-purple-800">{m.partCode}</td>
+                          <td className="p-3 font-semibold text-slate-900">{m.partName}</td>
+                          <td className="p-3 text-right font-black text-emerald-800">{m.requestedQty} {m.unit}</td>
+                          <td className="p-3 font-bold text-blue-700">📍 {m.bufferLocation}</td>
+                          <td className="p-3 text-slate-600">{m.requestedBy}</td>
+                          <td className="p-3 text-slate-700 font-semibold">{m.deliveredBy || '---'}</td>
+                          <td className="p-3 text-center">
+                            <span className="inline-flex items-center space-x-1 px-2.5 py-1 bg-emerald-100 text-emerald-800 text-[11px] font-extrabold rounded-lg border border-emerald-300">
+                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                              <span>Đã Giao Thành Công</span>
+                            </span>
+                          </td>
+                          {isAdmin && (
+                            <td className="p-3 text-center">
+                              <div className="flex items-center justify-center space-x-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => handleAdminRollbackRequest(m.requestId, 'DELIVERING')}
+                                  className="px-2 py-1 bg-amber-500 hover:bg-amber-600 text-slate-950 font-extrabold text-[10px] rounded-lg cursor-pointer flex items-center space-x-1 shadow-2xs"
+                                  title="Rollback về Đang Vận Chuyển và tự động hoàn trả tồn kho vào Kệ Outbuffer"
+                                >
+                                  <RotateCcw className="w-3 h-3" />
+                                  <span>Rollback (Hoàn Tồn)</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleAdminDeleteRequest(m.requestId, true)}
+                                  className="px-2 py-1 bg-rose-600 hover:bg-rose-700 text-white font-bold text-[10px] rounded-lg cursor-pointer flex items-center space-x-1 shadow-2xs"
+                                  title="Xóa lịch sử và tự động hoàn trả tồn kho vào Kệ Outbuffer"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                  <span>Xóa (Hoàn Tồn)</span>
+                                </button>
+                              </div>
+                            </td>
+                          )}
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Pagination Controls */}
+            {filteredCompletedReqs.length > 0 && (
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-3 px-1 border-t border-slate-200">
+                <div className="flex items-center space-x-2 text-xs font-semibold text-slate-600">
+                  <span>
+                    Hiển thị <strong>{((historyPage - 1) * historyPageSize) + 1}</strong> - <strong>{Math.min(historyPage * historyPageSize, filteredCompletedReqs.length)}</strong> trên tổng số <strong>{filteredCompletedReqs.length}</strong> đơn hoàn tất
+                  </span>
+                  <div className="hidden sm:flex items-center space-x-1 pl-3 border-l border-slate-300">
+                    <span className="text-slate-500 text-[11px]">Dòng/trang:</span>
+                    <select
+                      value={historyPageSize}
+                      onChange={(e) => {
+                        setHistoryPageSize(Number(e.target.value));
+                        setHistoryPage(1);
+                      }}
+                      className="px-2 py-1 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-800 outline-hidden cursor-pointer"
+                    >
+                      <option value={25}>25</option>
+                      <option value={50}>50</option>
+                      <option value={100}>100</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="flex items-center space-x-1">
+                  <button
+                    type="button"
+                    onClick={() => setHistoryPage(1)}
+                    disabled={historyPage <= 1}
+                    className="px-2.5 py-1.5 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-all shadow-2xs"
+                    title="Về trang đầu"
+                  >
+                    «
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}
+                    disabled={historyPage <= 1}
+                    className="px-3 py-1.5 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-all shadow-2xs"
+                  >
+                    ‹ Trước
+                  </button>
+
+                  <span className="px-3 py-1.5 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl text-xs font-black">
+                    Trang {historyPage} / {totalHistoryPages}
+                  </span>
+
+                  <button
+                    type="button"
+                    onClick={() => setHistoryPage((p) => Math.min(totalHistoryPages, p + 1))}
+                    disabled={historyPage >= totalHistoryPages}
+                    className="px-3 py-1.5 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-all shadow-2xs"
+                  >
+                    Sau ›
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setHistoryPage(totalHistoryPages)}
+                    disabled={historyPage >= totalHistoryPages}
+                    className="px-2.5 py-1.5 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-all shadow-2xs"
+                    title="Đến trang cuối"
+                  >
+                    »
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* MODAL QUẢN LÝ BÀN MÁY / VỊ TRÍ NHẬN HÀNG */}
+      {isManageLinesModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-3xl p-6 max-w-md w-full space-y-4 shadow-2xl border border-slate-200">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <h3 className="font-extrabold text-slate-900 text-base flex items-center space-x-2">
+                <Truck className="w-5 h-5 text-amber-600" />
+                <span>Quản Lý Vị Trí / Bàn Máy Nhận Hàng</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setIsManageLinesModalOpen(false)}
+                className="text-slate-400 hover:text-slate-600 font-bold text-lg cursor-pointer"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              <label className="block font-bold text-slate-800 text-xs">Thêm vị trí mới:</label>
+              <div className="flex items-center space-x-2">
+                <input
+                  type="text"
+                  value={newLineInput}
+                  onChange={(e) => setNewLineInput(e.target.value)}
+                  placeholder="Tên bàn máy (VD: Line SMT 3)..."
+                  className="flex-1 px-3 py-2 border border-slate-300 rounded-xl text-xs font-bold focus:ring-2 focus:ring-amber-500 outline-hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!newLineInput.trim()) return;
+                    if (assemblyLinesList.includes(newLineInput.trim())) return;
+                    const updated = [...assemblyLinesList, newLineInput.trim()];
+                    storageService.saveSettings({ ...settings, assemblyLines: updated });
+                    setAssemblyLine(newLineInput.trim());
+                    setNewLineInput('');
+                    onRefresh();
+                  }}
+                  className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold cursor-pointer transition-colors shrink-0"
+                >
+                  + Thêm
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-1.5 max-h-56 overflow-y-auto pt-2">
+              <label className="block font-bold text-slate-700 text-[11px] uppercase tracking-wider">Danh sách hiện tại ({assemblyLinesList.length}):</label>
+              {assemblyLinesList.map((line, idx) => (
+                <div
+                  key={idx}
+                  className="flex items-center justify-between p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800"
+                >
+                  <span>{line}</span>
+                  {assemblyLinesList.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const updated = assemblyLinesList.filter((_, i) => i !== idx);
+                        storageService.saveSettings({ ...settings, assemblyLines: updated });
+                        if (assemblyLine === line) {
+                          setAssemblyLine(updated[0] || '');
+                        }
+                        onRefresh();
+                      }}
+                      className="p-1 text-slate-400 hover:text-rose-600 rounded-lg transition-colors cursor-pointer"
+                      title="Xóa vị trí này"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <div className="pt-2 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setIsManageLinesModalOpen(false)}
+                className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-xl text-xs font-bold cursor-pointer"
+              >
+                Hoàn Tất
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Andon Scan Confirmation Popup Modal - Mobile First & Ultra Compact */}
+      {andonModalData && andonModalData.isOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-xs flex items-end sm:items-center justify-center p-2 sm:p-4 animate-in fade-in">
+          <div className="bg-white rounded-3xl max-w-md sm:max-w-lg w-full max-h-[90vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden relative">
+            {/* Header */}
+            <div className="p-3.5 sm:p-4 bg-gradient-to-r from-amber-50 to-orange-50 border-b border-amber-200/60 flex items-center justify-between shrink-0">
+              <div className="flex items-center space-x-2.5">
+                <div className="p-2 bg-amber-500 text-slate-950 rounded-xl shadow-xs">
+                  <Bell className="w-5 h-5 text-slate-950 animate-bounce" />
+                </div>
+                <div>
+                  <span className="text-[10px] font-black uppercase tracking-wider text-amber-900 bg-amber-200/80 px-2 py-0.5 rounded-md inline-block">
+                    ANDON SIGNAL
+                  </span>
+                  <h2 className="text-sm sm:text-base font-black text-slate-900 leading-tight">
+                    XÁC NHẬN PHIẾU GỌI LINH KIỆN
+                  </h2>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAndonModalData(null)}
+                className="p-1.5 text-slate-400 hover:text-slate-600 rounded-full hover:bg-white/80 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Scrollable Modal Content */}
+            <div className="flex-1 overflow-y-auto p-3.5 sm:p-4 space-y-3 text-xs">
+              {/* Part Info Summary Card */}
+              <div className="p-3 rounded-2xl border border-slate-200 bg-slate-50 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono font-black text-xs px-2.5 py-1 bg-blue-900 text-white rounded-lg shadow-2xs">
+                    MÃ: {andonModalData.partCode}
+                  </span>
+                  <span
+                    className={`px-2.5 py-0.5 rounded-full text-[11px] font-black border ${
+                      andonModalData.isKitted
+                        ? 'bg-emerald-100 text-emerald-950 border-emerald-300'
+                        : 'bg-amber-100 text-amber-950 border-amber-300'
+                    }`}
+                  >
+                    {andonModalData.statusText}
+                  </span>
+                </div>
+                <div className="font-extrabold text-slate-900 text-xs sm:text-sm">
+                  {andonModalData.partName}
+                </div>
+                {andonModalData.locationGuideText && (
+                  <p className="text-[11px] text-blue-900 font-bold bg-blue-50 border border-blue-200/70 p-2 rounded-xl">
+                    📍 {andonModalData.locationGuideText}
+                  </p>
+                )}
+              </div>
+
+              {/* Input Fields Grid */}
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block font-black text-slate-800 text-[11px] mb-1">
+                    SL CẤP ({andonModalData.unit}) <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={requestedQty}
+                    onChange={(e) => setRequestedQty(Number(e.target.value))}
+                    className="w-full px-3 py-2 bg-amber-50 border-2 border-amber-400 rounded-xl font-black text-amber-950 text-base focus:ring-2 focus:ring-amber-500 outline-hidden"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-black text-slate-800 text-[11px] mb-1">
+                    DÂY CHUYỀN NHẬN <span className="text-rose-500">*</span>
+                  </label>
+                  <select
+                    value={assemblyLine}
+                    onChange={(e) => setAssemblyLine(e.target.value)}
+                    className="w-full px-2.5 py-2.5 bg-blue-50 border-2 border-blue-400 rounded-xl font-extrabold text-blue-950 text-xs focus:ring-2 focus:ring-blue-500 outline-hidden"
+                  >
+                    {assemblyLinesList.map((line) => (
+                      <option key={line} value={line}>
+                        📍 {line}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Required Time Input */}
+              <div className="p-2.5 bg-rose-50 border-2 border-rose-300 rounded-2xl space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="block font-black text-rose-950 text-[11px] flex items-center space-x-1">
+                    <Clock className="w-3.5 h-3.5 text-rose-600 animate-pulse" />
+                    <span>GIỜ CẦN CHÍNH XÁC LINH KIỆN</span> <span className="text-rose-500">*</span>
+                  </label>
+                  <span className="text-[10px] text-rose-700 font-bold bg-white px-2 py-0.5 rounded-md border border-rose-200">
+                    ⏱ Ưu tiên phát hàng
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    type="time"
+                    value={requiredTime}
+                    onChange={(e) => setRequiredTime(e.target.value)}
+                    className="px-3 py-1.5 bg-white border-2 border-rose-400 rounded-xl font-black text-rose-950 text-sm focus:ring-2 focus:ring-rose-500 outline-hidden shadow-2xs shrink-0"
+                  />
+                  <div className="flex flex-wrap gap-1 items-center">
+                    <span className="text-[10px] text-rose-800 font-bold">Cần sau:</span>
+                    {['15', '30', '45', '60'].map((mins) => (
+                      <button
+                        key={mins}
+                        type="button"
+                        onClick={() => {
+                          const d = new Date();
+                          d.setMinutes(d.getMinutes() + parseInt(mins, 10));
+                          const h = String(d.getHours()).padStart(2, '0');
+                          const m = String(d.getMinutes()).padStart(2, '0');
+                          setRequiredTime(`${h}:${m}`);
+                        }}
+                        className="px-2 py-1 bg-rose-200 hover:bg-rose-300 text-rose-950 rounded-lg font-black text-[10px] cursor-pointer shadow-2xs transition-all active:scale-95"
+                      >
+                        +{mins}p
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* OUTBUFFER PICK SHELF SELECTOR */}
+              {andonModalData.isKitted && andonModalData.availableBuffers.length > 0 ? (
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-2xl space-y-2">
+                  <label className="block font-extrabold text-slate-800 text-[11px]">
+                    KỆ OUTBUFFER LẤY HÀNG (ƯU TIÊN FIFO) <span className="text-rose-500">*</span>
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={selectedPickShelf || andonModalData.recommendedLocation}
+                      onChange={(e) => setSelectedPickShelf(e.target.value)}
+                      className="flex-1 px-3 py-2 bg-white border-2 border-emerald-500 rounded-xl font-black text-slate-900 text-xs focus:ring-2 focus:ring-emerald-500 shadow-2xs"
+                    >
+                      {andonModalData.availableBuffers.map((b, idx) => (
+                        <option key={b.locationId} value={b.locationId}>
+                          [{b.locationId}] {b.modelName ? ` • ${b.modelName}` : ''} — Tồn: {b.currentStockQty} {andonModalData.unit} {idx === 0 ? ' ⭐(FIFO)' : ''}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => setIsAndonModalCameraOpen(!isAndonModalCameraOpen)}
+                      className="px-2.5 py-2 bg-emerald-700 hover:bg-emerald-800 text-white font-black text-[11px] rounded-xl flex items-center space-x-1 shrink-0 cursor-pointer shadow-2xs"
+                    >
+                      <QrCode className="w-3.5 h-3.5 text-amber-300" />
+                      <span>{isAndonModalCameraOpen ? 'Ẩn' : 'Quét'}</span>
+                    </button>
+                  </div>
+
+                  {isAndonModalCameraOpen && (
+                    <div className="mt-2">
+                      <SmoothCameraScanner
+                        onScanSuccess={(scannedShelf) => {
+                          setIsAndonModalCameraOpen(false);
+                          const cleanShelf = scannedShelf.trim().toUpperCase();
+                          setSelectedPickShelf(cleanShelf);
+                        }}
+                        onClose={() => setIsAndonModalCameraOpen(false)}
+                        placeholderText="Căn mã QR Kệ Outbuffer vào khung hình..."
+                        autoCloseOnScan={true}
+                      />
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-[11px] text-amber-950 font-bold flex items-center space-x-2">
+                  <Truck className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>CROSS-DOCKING TỪ KHU KITTING SẼ BÓC TÁCH GIAO THẲNG DÂY CHUYỀN</span>
+                </div>
+              )}
+            </div>
+
+            {/* STICKY FOOTER ACTION BAR - ALWAYS VISIBLE ON MOBILE */}
+            <div className="p-3 bg-white border-t border-slate-200 flex items-center gap-2 shrink-0 z-10 shadow-lg">
+              <button
+                type="button"
+                onClick={() => setAndonModalData(null)}
+                className="w-1/3 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs cursor-pointer text-center"
+              >
+                HỦY
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmAndonFromModal}
+                className="w-2/3 py-2.5 bg-amber-500 hover:bg-amber-600 text-slate-950 rounded-xl font-black text-xs shadow-md transition-all cursor-pointer flex items-center justify-center space-x-1.5"
+              >
+                <Bell className="w-4 h-4 text-slate-950" />
+                <span>🔔 XÁC NHẬN GỌI HÀNG</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Andon Error Modal */}
+      {andonErrorModal && andonErrorModal.isOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border-2 border-rose-300 space-y-4 relative text-center">
+            <div className="w-14 h-14 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto">
+              <AlertTriangle className="w-8 h-8" />
+            </div>
+
+            <h3 className="text-base font-black text-rose-900">{andonErrorModal.title}</h3>
+            <p className="text-xs text-slate-700 leading-relaxed font-semibold bg-rose-50 p-3 rounded-2xl border border-rose-200">
+              {andonErrorModal.message}
+            </p>
+
+            <button
+              type="button"
+              onClick={() => setAndonErrorModal(null)}
+              className="w-full py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-extrabold text-xs cursor-pointer shadow-md"
+            >
+              Đã Hiểu / Đóng
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Call Success Confirmation Modal - Specially designed for high visibility on mobile screens */}
+      {callSuccessModalData && callSuccessModalData.isOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl border-2 border-emerald-500 overflow-hidden text-left relative flex flex-col max-h-[92vh]">
+            {/* Modal Header */}
+            <div className="bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 p-4 sm:p-5 text-white text-center relative shrink-0">
+              <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center mx-auto mb-2 shadow-inner ring-4 ring-white/10 animate-bounce">
+                <CheckCircle2 className="w-7 h-7 text-white" />
+              </div>
+              <h3 className="text-base sm:text-lg font-black tracking-tight uppercase">
+                Tín Hiệu Gọi Hàng Đã Phát Thành Công!
+              </h3>
+              <p className="text-[11px] sm:text-xs text-emerald-100 font-medium mt-0.5">
+                Đã đồng bộ lên Supabase Cloud & thông báo tới bộ phận Logistics
+              </p>
+            </div>
+
+            {/* Modal Content */}
+            <div className="p-4 sm:p-5 space-y-3 overflow-y-auto">
+              {/* Part Details Card */}
+              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3.5 space-y-2.5">
+                <div>
+                  <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
+                    Mã & Tên Linh Kiện Đã Gọi
+                  </span>
+                  <span className="text-xs sm:text-sm font-black font-mono text-emerald-700 block break-words">
+                    [{callSuccessModalData.request.partCode}]
+                  </span>
+                  <span className="text-xs font-bold text-slate-800 block break-words">
+                    {callSuccessModalData.request.partName}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-200/80 text-xs">
+                  <div className="bg-white p-2 rounded-xl border border-slate-200">
+                    <span className="text-[10px] text-slate-500 block font-semibold">Số lượng gọi:</span>
+                    <span className="font-black text-amber-700 text-base">
+                      {callSuccessModalData.request.requestedQty.toLocaleString('vi-VN')} {callSuccessModalData.request.unit}
+                    </span>
+                    {callSuccessModalData.proposedMasterQty && (
+                      <span className="text-[10px] text-emerald-700 font-bold block mt-0.5">
+                        ✓ Đúng chuẩn Thẻ Thùng
+                      </span>
+                    )}
+                  </div>
+                  <div className="bg-white p-2 rounded-xl border border-slate-200">
+                    <span className="text-[10px] text-slate-500 block font-semibold">Dây chuyền nhận:</span>
+                    <span className="font-extrabold text-slate-900 text-sm">
+                      📍 {callSuccessModalData.request.assemblyLine || 'DCLR'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 pt-1 text-xs">
+                  <div className="bg-white p-2 rounded-xl border border-slate-200">
+                    <span className="text-[10px] text-slate-500 block font-semibold">Vị trí cấp hàng:</span>
+                    <span className="font-bold text-slate-800 text-[11px] block mt-0.5">
+                      {callSuccessModalData.request.isDirectKitting ? '🚚 Khu Bóc Tách Kitting' : `📦 Kệ ${callSuccessModalData.request.bufferLocation}`}
+                    </span>
+                  </div>
+                  <div className="bg-white p-2 rounded-xl border border-slate-200">
+                    <span className="text-[10px] text-slate-500 block font-semibold">Giờ cần giao:</span>
+                    <span className="font-extrabold text-rose-700 text-[11px] block mt-0.5">
+                      ⏰ {callSuccessModalData.request.requiredTime || 'Ưu tiên ngay'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Status Note */}
+              <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-2.5 text-[11px] text-emerald-950 space-y-1">
+                <p className="font-bold flex items-center space-x-1.5 text-emerald-900">
+                  <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  <span>Đã ghi nhận vào hệ thống & giữ nguyên trên Supabase Cloud</span>
+                </p>
+                <p className="text-slate-600 text-[10px] leading-relaxed">
+                  Đơn hàng đã được lưu trữ an toàn trên máy chủ. Bạn có thể tiếp tục phát tín hiệu gọi linh kiện khác hoặc chuyển qua tab đơn đang gọi để theo dõi giao nhận.
+                </p>
+              </div>
+            </div>
+
+            {/* Modal Actions */}
+            <div className="p-3.5 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setCallSuccessModalData(null)}
+                className="w-full sm:flex-1 py-3 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-black text-xs sm:text-sm shadow-md transition-all cursor-pointer flex items-center justify-center space-x-1.5 active:scale-98"
+              >
+                <span>➕ Tiếp Tục Gọi Hàng</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setCallSuccessModalData(null);
+                  handleTabClick('calling');
+                }}
+                className="w-full sm:flex-1 py-3 px-4 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded-xl font-extrabold text-xs sm:text-sm shadow-xs transition-all cursor-pointer flex items-center justify-center space-x-1.5 active:scale-98"
+              >
+                <span>📋 Xem Đơn Đang Gọi ({callingReqs.length + 1})</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Container Tag Manager Modal for Andon Selection */}
+      <ContainerTagManagerModal
+        isOpen={isAndonTagManagerOpen}
+        onClose={() => setIsAndonTagManagerOpen(false)}
+        onSelectTagForKitting={(tag) => {
+          handleParseAndonQrPayload(tag.qrPayload || tag.partCode);
+          setIsAndonTagManagerOpen(false);
+        }}
+      />
+    </div>
+  );
+};

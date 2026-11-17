@@ -1,179 +1,353 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
+export type TransactionType =
+  | 'IN'
+  | 'OUT'
+  | 'AUDIT_ADJUSTMENT'
+  | 'TRANSFER_TO_NG'
+  | 'IMPORT_NG'
+  | 'EXPORT_NG_RTV'
+  | 'EXPORT_NG_SCRAP';
 
-export type StageId = 'LASER' | 'BENDING' | 'WELDING' | 'PAINTING' | 'DCLR' | 'GLAZING';
+export interface PartLocationStock {
+  locationName: string; // e.g. "Kệ A1"
+  quantity: number;     // e.g. 2000
+}
 
 export interface Part {
   id: string;
-  name: string;
-  unit: string;
-  level?: number;
-  skipLaser?: boolean;
-  skipBending?: boolean;
-  skipWelding?: boolean;
-  skipPainting?: boolean;
-  hasPaintingPO?: boolean;
-}
-
-export interface InventoryItem {
-  partId: string;
-  originalPartId?: string; // Tracks the source identity if transformed
-  stageId: StageId;
-  location: 'IN' | 'OUT' | 'DEFECT';
-  quantity: number;
+  code: string; // Mã linh kiện (e.g. LK-RES-10K)
+  name: string; // Tên linh kiện
+  description: string; // Mô tả
+  imageUrl?: string; // Ảnh linh kiện
+  location: string; // Vị trí lưu tổng hợp (e.g. Kệ A1 (2000), Kệ A2 (1647))
+  locations?: PartLocationStock[]; // Chi tiết phân bổ tồn kho theo từng kệ
+  unit: string; // Đơn vị (e.g. Cái, Bộ, Cuộn, Con, Kg...)
+  currentStock: number; // Tổng tồn hiện tại (Kho chính)
+  qtyNg?: number; // Số lượng tồn kho NG (Hàng lỗi)
+  minStock: number; // Tồn tối thiểu
+  barcode: string; // Mã vạch
+  qrCode: string; // Mã QR
+  note?: string; // Ghi chú
+  createdAt: string; // ISO Date
+  updatedAt: string; // ISO Date
 }
 
 export interface Transaction {
   id: string;
-  type: 'STAGE_OUT' | 'STAGE_IN' | 'DEFECT' | 'DISPOSAL';
   partId: string;
-  partName?: string; // Cache the name at time of transaction
-  originalPartId?: string; // If part was transformed upon entry
-  quantity: number;
-  stageId: StageId;
-  location?: 'IN' | 'OUT' | 'DEFECT';
-  timestamp: number;
-  qrData?: string;
-  sourceStageId?: StageId; // For STAGE_IN, where it came from
-  targetStageId?: StageId; // For STAGE_OUT, where it is intended to go
-  poId?: string; // Link to production order
-  printed?: boolean;
-  defectReason?: string;
-  defectCategory?: string;
-}
-
-export interface BOMDefinition {
-  parentPartId: string; // Level 3 part (Tôn tấm)
-  childPartId: string;  // Level 2 part (Linh kiện)
-  componentWeight: number; // KG of component per unit of child
-  scrapWeight: number;     // KG of scrap per unit of child
-}
-
-export interface BOMDefinitionV2 {
-  resultPartId: string;
-  ingredientPartId: string;
-  quantity: number; // Amount of ingredient per unit of result
-  applicableModel?: string;
-}
-
-export interface ModelBOMDefinition {
-  modelId: string;
-  partId: string; // Level 1 part
-  quantity: number;
-}
-
-export interface ProductionOrder {
-  id: string;
-  masterPoId?: string; // Links to the top-level Model PO
-  partId: string;
-  stageId?: StageId; // Which stage this PO is for (null for Model PO)
-  targetQuantity: number;
-  producedQuantity: number;
-  exportedQuantity: number;
-  status: 'PENDING' | 'IN_PROGRESS' | 'PAUSED' | 'COMPLETED';
-  createdAt: number;
-  completedAt?: number;
-  plannedStartTime?: number;
-  leadTime?: number;
-  expectedCompletionTime?: number;
-}
-
-export interface ProductivityNorm {
-  partId: string;
-  stageId: StageId;
-  secondsPerUnit: number; // Time in seconds to process 1 unit
-}
-
-export interface LaserNesting {
-  nestingId: string;
-  partId: string;
-  qtyPerSheet: number;
-  secondsPerUnit: number; // Time for this individual part
-  secondsPerSheet: number; // Total time for the full sheet
-  applicableModel?: string;
-}
-
-export interface BreakTime {
-  start: string; // HH:mm
-  end: string;   // HH:mm
-}
-
-export interface WorkerOverride {
-  modelId: string;
-  workerCount: number;
-}
-
-export interface ShiftConfig {
-  stageId: StageId;
-  workerCount: number; // Number of people or parallel resources
-  workerOverrides?: WorkerOverride[];
-  workOnSunday?: boolean; // Toggles working on Sunday
-  shifts: {
-    start: string; // HH:mm
-    end: string;   // HH:mm
-  }[];
-  breaks: BreakTime[];
-}
-
-export interface PartTransformation {
-  sourcePartId: string;
-  targetPartId: string;
-  targetStageId: StageId;
-  applicableModel?: string;
-}
-
-export interface GlazingConfig {
+  partCode: string;
   partName: string;
-  partId: string;
-  sourceStageId: StageId;
+  unit: string;
+  type: TransactionType;
+  quantity: number;
+  date: string; // YYYY-MM-DD or ISO string
+  person: string; // Người thực hiện (Người nhập hoặc Người lấy)
+  locationId?: string; // Nơi lưu trữ thực tế
+  productionOrder?: string; // Lệnh sản xuất (e.g. LSX-2026-088)
+  voucherCode?: string; // Mã phiếu xuất kho (e.g. PXK-BOM-20261029-001)
+  reasonOrPurpose?: string; // Lý do nhập / Mục đích xuất / Lý do lỗi
+  ngReason?: string; // Do Nhà Cung Cấp / Do Thao Tác Nội Bộ / etc.
+  ngType?: 'VENDOR' | 'INTERNAL' | 'OTHER';
+  notes?: string; // Ghi chú
+  stockBefore: number; // Tồn kho chính trước giao dịch
+  stockAfter: number; // Tồn kho chính sau giao dịch
+  ngStockBefore?: number; // Tồn kho NG trước giao dịch
+  ngStockAfter?: number; // Tồn kho NG sau giao dịch
 }
 
-export interface GlazingOutConfig {
-  finalPartName: string;
-  subParts: {
-    partId: string;
-    partName: string;
-  }[];
-}
-
-export interface GlazingPlanNorm {
+export interface WarehouseLocation {
   id: string;
+  name: string; // e.g. A1, B2
+  description?: string;
+}
+
+export interface AppSettings {
+  companyName: string;
+  warehouseName: string;
+  address: string;
+  managerName: string;
+  phone: string;
+  staffList: string[]; // Danh sách người thực hiện (Thủ kho / Kỹ thuật)
+  stockInReasons: string[]; // Danh sách lý do nhập kho
+  stockOutPurposes: string[]; // Danh sách mục đích xuất kho
+  productionOrders: string[]; // Danh sách mã lệnh sản xuất (LSX)
+  assemblyLines?: string[]; // Danh sách Dây Chuyền / Bàn Máy Yêu Cầu Cấp Hàng (Vị trí nhận hàng)
+  locations: WarehouseLocation[];
+}
+
+export interface ModelBOMItem {
+  partCode: string;
   partName: string;
-  norm: number;
+  quantity: number;
+  unit: string;
+}
+
+export interface ModelBOM {
+  id: string;
+  name: string; // Model name / Lệnh sản xuất
+  items: ModelBOMItem[];
+  createdAt: string;
+}
+
+export type ViewTab =
+  | 'dashboard'
+  | 'parts'
+  | 'stock_in'
+  | 'stock_out'
+  | 'kitting'
+  | 'buffer'
+  | 'andon'
+  | 'andon_request'
+  | 'andon_calling'
+  | 'andon_delivering'
+  | 'andon_history'
+  | 'ng_warehouse'
+  | 'bin_card'
+  | 'warehouse_map'
+  | 'reports'
+  | 'settings'
+  | 'users';
+
+export interface UserAccount {
+  id: string;
+  username: string; // Tên đăng nhập
+  password: string; // Mật khẩu
+  fullName: string; // Họ và tên
+  roleTitle: string; // Chức danh / Vai trò (vd: Quản trị viên, Thủ kho...)
+  allowedTabs: ViewTab[]; // Chức năng được phép truy cập
+  canConfigureBuffer?: boolean; // Quyền cấu hình kệ & nhập linh kiện trên sơ đồ OUTBUFFER
+  isActive: boolean; // Trạng thái hoạt động
+  createdAt: string;
+  lastLoginAt?: string;
+}
+
+export interface KittingQueueItem {
+  id: string;
+  transactionId: string; // liên kết phiếu Xuất Kho thô gốc
+  transactionIds?: string[]; // Danh sách ID các giao dịch xuất kho đã cộng dồn
+  voucherCode?: string; // Mã phiếu xuất kho (e.g. "PXK-EXCEL-001" hoặc người dùng tự đặt)
+  voucherTitle?: string; // Tên / Mô tả phiếu xuất kho
+  sourceBin?: string; // BIN / Vị trí kho đã xuất trước đó để rollback chính xác
+  fifoAllocations?: Array<{
+    locationName: string;
+    quantity: number;
+    lotId?: string;
+    contNumber?: string;
+  }>; // Chi tiết phân bổ FIFO theo BIN
+  partCode: string;
+  partName: string;
+  unit: string;
+  rawQuantity: number; // SL xuất thô carton / SL cần bóc tách
+  kittedQuantity: number; // SL thực tế bóc đóng thùng xanh
+  scrapQuantity: number; // SL phế phẩm/hỏng do móp vỡ thùng thô
+  bufferLocation: string; // Mã kệ OUTBUFFER, ví dụ: BUFFER-A1-02
+  status: 'PENDING_KITTING' | 'IN_BUFFER' | 'DELIVERED' | 'ROLLED_BACK';
+  startTime?: string;
+  endTime?: string;
+  durationMinutes?: number; // Thời gian bóc tách
+  operatorName?: string; // Tên nhân viên bóc tách
+  kittingProductivity?: number; // PCS/Giờ = kittedQuantity / (durationMinutes / 60)
+  createdAt: string;
+  allItemIds?: string[]; // Danh sách các ID lô xuất khi cộng dồn nhiều đợt
+  batchCount?: number; // Số đợt xuất đã cộng dồn
+}
+
+export interface BufferPartItem {
+  id?: string;
+  partCode: string;
+  partName: string;
+  unit: string;
+  currentStockQty: number;
+  containerStandardQty?: number;
+  modelName?: string;
+  lastUpdated?: string;
+}
+
+export interface BufferLocationMap {
+  locationId: string; // e.g. BUFFER-A1-01
+  description?: string; // Mô tả vị trí kệ (e.g. Khoang 01 - Tầng 1 - Vị trí 1)
+  modelName?: string; // Model sản xuất gán cho kệ này (nếu có, e.g. "Model LSX-2026-TDH09")
+  items?: BufferPartItem[]; // Danh sách các linh kiện chứa trên kệ này (1 kệ chứa nhiều linh kiện)
+  partCode?: string; // Legacy / Primary partCode
+  partName?: string; // Legacy / Primary partName
+  unit?: string; // Legacy / Primary unit
+  currentStockQty: number; // Tổng số lượng tồn kho trên kệ
+  containerStandardQty: number; // Quy cách thùng xanh (e.g. 50 cái/thùng)
+  status: 'EMPTY' | 'READY' | 'CALL_PENDING';
+  lastUpdated: string; // Dùng kiểm soát FIFO tại Buffer
+}
+
+export interface MaterialCallRequest {
+  requestId: string;
+  assemblyLine: string; // Dây chuyền/Bàn máy gọi
+  partCode: string;
+  partName: string;
+  unit: string;
+  requestedQty: number;
+  bufferLocation: string; // Kệ Buffer lấy hàng hoặc "KHU BÓC TÁCH KITTING"
+  isDirectKitting?: boolean; // Tín hiệu Bóc tách & Giao thẳng (Cross-docking)
+  requestedBy: string;
+  requestedAt: string;
+  requiredTime?: string; // Giờ cần chính xác linh kiện đó (e.g. "08:30" hoặc "09:15"...)
+  status: 'CALLING' | 'DELIVERING' | 'COMPLETED';
+  isStockDeducted?: boolean; // Đã trừ tồn trong danh sách chờ bóc tách hoặc kệ outbuffer
+  deliveredBy?: string;
+  deliveredAt?: string;
+}
+
+export interface ContainerQrTag {
+  id: string; // Token ID e.g. "TAG-GAOU7800407-LK001-xxxx"
+  partCode: string;
+  partName: string;
+  unit: string;
+  quantity: number;
+  contNumber: string;
+  contDate: string;
+  supplier?: string; // Nhà cung cấp (hiển thị trên nhãn tem in, không cần nằm trong mã QR)
+  mfgDate?: string; // Ngày sản xuất (hiển thị trên nhãn tem in, không cần nằm trong mã QR)
+  qrPayload: string; // CONT_IN|MãVT|SL|MãCont|TagID|NgàyCont
+  printCopies: number;
+  isUsed?: boolean;
+  importedQuantity?: number;
+  scannedAt?: string;
+  scannedBy?: string;
+}
+
+export interface ContainerBatch {
+  id: string; // Batch ID e.g. "batch-1721000..."
+  contNumber: string;
+  contDate: string;
+  createdAt: string; // ISO
+  totalItems: number;
+  totalQuantity: number;
+  items: ContainerQrTag[];
+}
+
+export interface FifoLot {
+  id: string;
+  partId: string;
+  partCode: string;
+  partName: string;
+  contNumber: string; // Số Cont hoặc tên ghi chú Cont
+  locationName?: string; // Tên Kệ / Vị trí nhập kho (e.g. Kệ A1)
+  importDate: string; // Ngày nhập kho
+  originalQty: number; // Số lượng nhập ban đầu
+  consumedQty: number; // Số lượng đã xuất
+  remainingQty: number; // Số lượng còn tồn hiện tại trong mốc này
+  status: 'FIFO_NEXT' | 'WAITING' | 'DEPLETED'; // FIFO_NEXT = Ưu tiên xuất trước #1
+  notes?: string;
+  isInitialBaseline?: boolean; // Đánh dấu lô tồn khởi tạo ban đầu
+}
+
+export interface StockCheckRecord {
+  id: string;
+  partId: string;
+  partCode: string;
+  partName: string;
+  unit: string;
+  location: string;
+  expectedQuantity: number;
+  actualQuantity: number;
+  actualStock?: number;
+  discrepancy: number;
+  reason?: string;
+  checkDate: string;
+  checkedBy: string;
+  systemStock?: number;
+  difference?: number;
+  performedBy?: string;
+  status?: string;
+  note?: string;
+}
+
+export interface BomExportVoucherRoundRecord {
+  roundNumber: number;
+  dateTime: string;
+  person: string;
+  notes?: string;
+  items: Array<{
+    partCode: string;
+    quantity: number;
+    fifoLocation?: string;
+  }>;
+}
+
+export interface BomExportVoucherItem {
+  partCode: string;
+  partName: string;
+  unit: string;
+  bomQtyPerSet: number;
+  requiredQty?: number; // Tổng số lượng cần xuất theo định mức = bomQtyPerSet * modelQty
+  exportedQty?: number; // Số lượng đã thực tế xuất (lũy kế qua các đợt)
+  remainingQty?: number; // Số lượng còn thiếu cần xuất bù = requiredQty - exportedQty
+  currentBatchQty?: number; // Số lượng xuất trong đợt này
+  totalQtyOut: number; // Tương thích ngược: tổng đã xuất
+  fifoLocation: string;
+  status?: 'COMPLETED' | 'PARTIAL' | 'PENDING';
+  isExtraConsumable?: boolean; // Đánh dấu linh kiện tiêu hao thêm ngoài định mức
+  extraNote?: string; // Ghi chú lý do tiêu hao thêm
+  kittedQty?: number; // Số lượng đã bóc tách từ phiếu xuất kho này
+}
+
+export interface BomExportVoucher {
+  id: string;
+  voucherCode: string;
+  exportDate?: string;
+  lsxCode?: string;
+  assemblyLine?: string;
+  totalSets?: number;
+  items: BomExportVoucherItem[];
+  createdByName?: string;
+  createdAt: string;
+  updatedAt?: string;
   modelName: string;
-  appliedModel?: string; // The model this component belongs to
+  modelQty: number;
+  dateTime?: string;
+  person: string;
+  totalPartsCount?: number;
+  totalQtyRequired?: number; // Tổng SL cần xuất của toàn phiếu
+  totalQtyOut?: number; // Tổng SL đã xuất thực tế lũy kế
+  totalQtyRemaining?: number; // Tổng SL còn thiếu cần xuất bù
+  voucherType?: 'BOM' | 'EXCEL' | 'MANUAL';
+  status?: 'ACTIVE' | 'PARTIAL' | 'COMPLETED' | 'ROLLED_BACK'; // PARTIAL: Đang xuất bù, COMPLETED: Đã hoàn thành
+  dispatchRounds?: number; // Số đợt xuất (1, 2, 3...)
+  roundsHistory?: BomExportVoucherRoundRecord[];
+  notes?: string;
 }
 
-export interface GlazingPlan {
+export interface ConversionFactor {
+  partCode: string;
+  partName: string;
+  hsqd: number; // Hệ số quy đổi (e.g. 1.00, 3.98, 1.14...)
+  updatedAt?: string;
+}
+
+export interface KittingScanLog {
   id: string;
-  modelId: string;
-  targetQuantity: number;
-  targetCompletionTime: number;
-  plannedStartTime?: number;
-  expectedCompletionTime?: number;
-  createdAt: number;
-  status: 'PENDING' | 'IN_PROGRESS' | 'COMPLETED';
-  producedQuantities?: Record<string, number>; // Track printed quantity per component ID
+  partCode: string;
+  partName: string;
+  unit: string;
+  quantity: number;
+  timestamp: string; // ISO string
+  bufferLocation: string;
+  operatorName?: string;
+  voucherCode?: string; // Mã phiếu xuất kho trừ tồn
 }
 
-export const STAGES: { id: StageId; name: string; nextStageId?: StageId }[] = [
-  { id: 'LASER', name: 'Cắt Laser', nextStageId: 'BENDING' },
-  { id: 'BENDING', name: 'Chấn/Dập', nextStageId: 'WELDING' },
-  { id: 'WELDING', name: 'Hàn', nextStageId: 'PAINTING' },
-  { id: 'PAINTING', name: 'Sơn', nextStageId: 'DCLR' },
-  { id: 'DCLR', name: 'Lắp ráp (DCLR)', nextStageId: 'GLAZING' },
-  { id: 'GLAZING', name: 'Dán Kính' },
-];
+export interface HourlyPersonnelSlot {
+  slot: string; // e.g. "8h-9h"
+  nsChinhThuc: number;
+  nsThoiVu: number;
+  nhanSuMoiGio: number; // nsChinhThuc + nsThoiVu
+}
 
-export const DEFECT_REASONS = [
-  { id: 'SCRATCH', name: 'Trầy xước / Móp méo' },
-  { id: 'DIMENSION', name: 'Sai kích thước / Bản vẽ' },
-  { id: 'WELD_FAIL', name: 'Mối hàn lỗi / Thủng' },
-  { id: 'PAINT_FAIL', name: 'Bề mặt sơn không đạt / Chảy sơn' },
-  { id: 'MATERIAL', name: 'Lỗi vật liệu (Phôi)' },
-  { id: 'OTHER', name: 'Lỗi khác (Ghi chú thêm)' },
-];
+export interface ProductivityPersonnelConfig {
+  chinhThuc: number;
+  soanVatTu: number;
+  bocTach: number;
+  bocXep: number;
+  xeNang: number;
+  capPhat: number;
+  hourlySlots: HourlyPersonnelSlot[];
+  khsxMap?: { [partCode: string]: number };
+}
 
-export const INITIAL_PARTS: Part[] = [];
