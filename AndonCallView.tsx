@@ -185,7 +185,8 @@ export const AndonCallView: React.FC<AndonCallViewProps> = ({
     return `${hours}:${minutes}`;
   };
 
-  const [assemblyLine, setAssemblyLine] = useState('DCLR');
+  const [assemblyLine, setAssemblyLine] = useState('');
+  const [andonModalLineError, setAndonModalLineError] = useState('');
   const [isCustomLineMode, setIsCustomLineMode] = useState(false);
   const [isManageLinesModalOpen, setIsManageLinesModalOpen] = useState(false);
   const [newLineInput, setNewLineInput] = useState('');
@@ -381,9 +382,8 @@ export const AndonCallView: React.FC<AndonCallViewProps> = ({
       : Math.min(targetQty, pendingRawQty);
     setRequestedQty(initialCallQty > 0 ? initialCallQty : targetQty);
 
-    if (assemblyLinesList && assemblyLinesList.length > 0) {
-      setAssemblyLine(assemblyLinesList[0]);
-    }
+    setAssemblyLine('');
+    setAndonModalLineError('');
 
     // Open Andon Scan Modal IMMEDIATELY
     setAndonModalData({
@@ -527,12 +527,7 @@ export const AndonCallView: React.FC<AndonCallViewProps> = ({
     }
   }, [partSelectOptions, selectedPartCode, getMasterTagForPart]);
 
-  // Keep assemblyLine in sync if settings update
-  useEffect(() => {
-    if (assemblyLinesList.length > 0 && !assemblyLinesList.includes(assemblyLine)) {
-      setAssemblyLine(assemblyLinesList[0]);
-    }
-  }, [assemblyLinesList]);
+
 
   // Determine auto-selected buffer location for the chosen part code
   const chosenBufferInfo = bufferPartsMap.get(selectedPartCode);
@@ -565,6 +560,12 @@ export const AndonCallView: React.FC<AndonCallViewProps> = ({
   const handleCreateCallRequest = async (e: React.FormEvent) => {
     e.preventDefault();
 
+    const trimmedLine = assemblyLine.trim();
+    if (!trimmedLine) {
+      setMessage({ type: 'error', text: 'Vui lòng nhập hoặc chọn Dây Chuyền / Bàn Máy Yêu Cầu Cấp Hàng!' });
+      return;
+    }
+
     if (!selectedPartCode) {
       setMessage({ type: 'error', text: 'Vui lòng chọn mã linh kiện cần gọi!' });
       return;
@@ -590,7 +591,7 @@ export const AndonCallView: React.FC<AndonCallViewProps> = ({
 
     try {
       const { newReq, cloudSynced } = await storageService.createMaterialCallRequestAndSync({
-        assemblyLine,
+        assemblyLine: trimmedLine,
         partCode: selectedPartCode,
         partName: partName || selectedPartCode,
         unit,
@@ -644,6 +645,7 @@ export const AndonCallView: React.FC<AndonCallViewProps> = ({
 
       onRefresh();
       // Giữ nguyên tại tab gọi hàng (không nhảy qua tab đơn đang gọi) để người thao tác tiếp tục gọi
+      setAssemblyLine('');
       setSelectedPartCode('');
       setRequestedQty(10);
       setProposedMasterQty(null);
@@ -655,7 +657,11 @@ export const AndonCallView: React.FC<AndonCallViewProps> = ({
   const handleConfirmAndonFromModal = async () => {
     if (!andonModalData) return;
     const { partCode, partName, unit, isKitted, recommendedLocation, availableBuffers, kittedStockQty, pendingRawQty } = andonModalData;
-    const targetLine = assemblyLine || 'DCLR';
+    const targetLine = assemblyLine.trim();
+    if (!targetLine) {
+      setAndonModalLineError('Vui lòng nhập hoặc chọn Dây Chuyền / Bàn Máy Nhận Hàng!');
+      return;
+    }
     const chosenPickLocation = isKitted ? (selectedPickShelf || recommendedLocation) : 'KHU BÓC TÁCH KITTING';
 
     // Stock validation against actual available quantity on chosen shelf
@@ -737,6 +743,8 @@ export const AndonCallView: React.FC<AndonCallViewProps> = ({
       });
 
       onRefresh();
+      setAssemblyLine('');
+      setAndonModalLineError('');
       // Giữ nguyên tab gọi hàng để tiếp tục thao tác
     } catch (err: any) {
       setMessage({ type: 'error', text: err.message || 'Lỗi khi tạo tín hiệu Andon' });
@@ -777,10 +785,11 @@ export const AndonCallView: React.FC<AndonCallViewProps> = ({
     if (syncingRequestIds.includes(requestId)) return;
     setSyncingRequestIds((prev) => [...prev, requestId]);
     try {
+      const existingReq = materialCalls.find((m) => m.requestId === requestId);
       const { updated, cloudSynced } = await storageService.updateMaterialCallStatusAndSync(
         requestId,
         'COMPLETED',
-        delivererName
+        existingReq?.deliveredBy
       );
       if (cloudSynced) {
         setMessage({
@@ -1006,6 +1015,20 @@ export const AndonCallView: React.FC<AndonCallViewProps> = ({
       const minutes = String(d.getMinutes()).padStart(2, '0');
       const seconds = String(d.getSeconds()).padStart(2, '0');
       return `${hours}:${minutes}:${seconds} - ${day}/${month}/${year}`;
+    } catch {
+      return isoString;
+    }
+  };
+
+  const formatVietnamDate = (isoString: string) => {
+    if (!isoString) return 'Chưa ghi nhận';
+    try {
+      const d = new Date(isoString);
+      if (isNaN(d.getTime())) return isoString;
+      const day = String(d.getDate()).padStart(2, '0');
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const year = d.getFullYear();
+      return `${day}/${month}/${year}`;
     } catch {
       return isoString;
     }
@@ -1420,12 +1443,21 @@ export const AndonCallView: React.FC<AndonCallViewProps> = ({
                     </div>
 
                     <div className="p-3 bg-blue-50/80 border border-blue-100 rounded-xl text-xs space-y-1">
-                      <div className="flex items-center justify-between">
+                      <div className="flex items-start justify-between gap-2">
                         <span className="font-bold text-blue-900">Nơi nhận hàng:</span>
-                        {req.requiredTime && (
-                          <span className="text-[11px] font-mono font-black text-rose-800 bg-rose-100 px-2 py-0.5 rounded-md border border-rose-300">
-                            ⏰ Cần lúc: {req.requiredTime}
-                          </span>
+                        {(req.requiredTime || req.requestedAt) && (
+                          <div className="flex flex-col items-end gap-1">
+                            {req.requiredTime && (
+                              <span className="text-[11px] font-mono font-black text-rose-800 bg-rose-100 px-2 py-0.5 rounded-md border border-rose-300">
+                                ⏰ Cần lúc: {req.requiredTime}
+                              </span>
+                            )}
+                            {req.requestedAt && (
+                              <span className="text-[11px] font-mono font-bold text-slate-700 bg-white px-2 py-0.5 rounded-md border border-slate-200">
+                                📅 Ngày: {formatVietnamDate(req.requestedAt)}
+                              </span>
+                            )}
+                          </div>
                         )}
                       </div>
                       <p className="font-extrabold text-slate-900 text-sm">{req.assemblyLine}</p>
@@ -1581,7 +1613,7 @@ export const AndonCallView: React.FC<AndonCallViewProps> = ({
 
               {showManualForm && (
                 <div className="space-y-4 pt-2 border-t border-slate-200 animate-in fade-in w-full min-w-0">
-                  {/* 1. Dây Chuyền / Bàn Máy Yêu Cầu Cấp Hàng - Default DCLR */}
+                  {/* 1. Dây Chuyền / Bàn Máy Yêu Cầu Cấp Hàng - Bắt buộc nhập */}
                   <div className="w-full min-w-0">
                     <div className="flex items-center justify-between mb-1">
                       <label className="block font-bold text-slate-800 text-xs">
@@ -1593,7 +1625,7 @@ export const AndonCallView: React.FC<AndonCallViewProps> = ({
                         className="text-[11px] font-bold text-amber-700 hover:text-amber-900 underline flex items-center space-x-1 cursor-pointer"
                       >
                         <SettingsIcon className="w-3.5 h-3.5" />
-                        <span>{isCustomLineMode ? 'Mặc Định DCLR' : 'Sửa Chi Tiết'}</span>
+                        <span>{isCustomLineMode ? 'Ẩn Chọn Nhanh' : 'Sửa Chi Tiết'}</span>
                       </button>
                     </div>
 
@@ -1601,6 +1633,7 @@ export const AndonCallView: React.FC<AndonCallViewProps> = ({
                       <div className="space-y-2">
                         <input
                           type="text"
+                          required
                           value={assemblyLine}
                           onChange={(e) => setAssemblyLine(e.target.value)}
                           placeholder="Nhập thủ công vị trí / bàn máy / dây chuyền..."
@@ -1631,9 +1664,11 @@ export const AndonCallView: React.FC<AndonCallViewProps> = ({
                       <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                         <input
                           type="text"
+                          required
                           value={assemblyLine}
                           onChange={(e) => setAssemblyLine(e.target.value)}
-                          className="w-full flex-1 px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl font-extrabold text-amber-900 text-sm focus:ring-2 focus:ring-amber-500 outline-hidden"
+                          placeholder="Nhập vị trí / bàn máy / dây chuyền nhận hàng (Bắt buộc)..."
+                          className="w-full flex-1 px-3.5 py-2.5 bg-white border border-slate-300 rounded-xl font-extrabold text-amber-900 text-sm focus:ring-2 focus:ring-amber-500 outline-hidden"
                         />
                         <button
                           type="button"
@@ -1645,7 +1680,7 @@ export const AndonCallView: React.FC<AndonCallViewProps> = ({
                       </div>
                     )}
                     <p className="text-[10px] text-slate-400 mt-1 italic">
-                      * Mặc định là DCLR. Bấm "Sửa Chi Tiết" nếu muốn ghi thủ công tên bàn máy / dây chuyền cụ thể.
+                      * Bắt buộc điền vị trí / bàn máy / dây chuyền nhận hàng (hoặc bấm "Sửa Chi Tiết" để chọn nhanh).
                     </p>
                   </div>
 
@@ -2412,8 +2447,8 @@ export const AndonCallView: React.FC<AndonCallViewProps> = ({
               </div>
 
               {/* Input Fields Grid */}
-              <div className="grid grid-cols-2 gap-2.5">
-                <div>
+              <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5">
+                <div className="sm:col-span-4">
                   <label className="block font-black text-slate-800 text-[11px] mb-1">
                     SL CẤP ({andonModalData.unit}) <span className="text-rose-500">*</span>
                   </label>
@@ -2426,21 +2461,96 @@ export const AndonCallView: React.FC<AndonCallViewProps> = ({
                   />
                 </div>
 
-                <div>
-                  <label className="block font-black text-slate-800 text-[11px] mb-1">
-                    DÂY CHUYỀN NHẬN <span className="text-rose-500">*</span>
-                  </label>
-                  <select
-                    value={assemblyLine}
-                    onChange={(e) => setAssemblyLine(e.target.value)}
-                    className="w-full px-2.5 py-2.5 bg-blue-50 border-2 border-blue-400 rounded-xl font-extrabold text-blue-950 text-xs focus:ring-2 focus:ring-blue-500 outline-hidden"
-                  >
-                    {assemblyLinesList.map((line) => (
-                      <option key={line} value={line}>
-                        📍 {line}
-                      </option>
-                    ))}
-                  </select>
+                <div className="sm:col-span-8">
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block font-black text-slate-800 text-[11px]">
+                      DÂY CHUYỀN NHẬN <span className="text-rose-500">*</span>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setIsCustomLineMode(!isCustomLineMode)}
+                      className="text-[11px] font-bold text-amber-700 hover:text-amber-900 underline flex items-center space-x-1 cursor-pointer"
+                    >
+                      <SettingsIcon className="w-3 h-3" />
+                      <span>{isCustomLineMode ? 'Ẩn Chọn Nhanh' : 'Sửa Chi Tiết'}</span>
+                    </button>
+                  </div>
+
+                  {isCustomLineMode ? (
+                    <div className="space-y-1.5">
+                      <input
+                        type="text"
+                        required
+                        value={assemblyLine}
+                        onChange={(e) => {
+                          setAssemblyLine(e.target.value);
+                          if (andonModalLineError) setAndonModalLineError('');
+                        }}
+                        placeholder="Nhập thủ công vị trí / bàn máy / dây chuyền (Bắt buộc)..."
+                        className={`w-full px-3 py-2 rounded-xl font-extrabold text-slate-900 text-xs outline-hidden border-2 ${
+                          andonModalLineError
+                            ? 'bg-rose-50 border-rose-500 focus:ring-2 focus:ring-rose-500'
+                            : 'bg-white border-amber-400 focus:ring-2 focus:ring-amber-500'
+                        }`}
+                      />
+                      <div className="flex flex-wrap gap-1 items-center">
+                        <span className="text-[10px] text-slate-500 font-bold">Chọn nhanh:</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAssemblyLine('DCLR');
+                            if (andonModalLineError) setAndonModalLineError('');
+                          }}
+                          className="px-2 py-0.5 bg-slate-100 hover:bg-amber-100 border border-slate-300 rounded text-[10px] font-bold cursor-pointer"
+                        >
+                          DCLR (Ghi chung)
+                        </button>
+                        {assemblyLinesList.map((line) => (
+                          <button
+                            key={line}
+                            type="button"
+                            onClick={() => {
+                              setAssemblyLine(line);
+                              if (andonModalLineError) setAndonModalLineError('');
+                            }}
+                            className="px-2 py-0.5 bg-slate-100 hover:bg-amber-100 border border-slate-300 rounded text-[10px] font-bold cursor-pointer"
+                          >
+                            {line}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="text"
+                        required
+                        value={assemblyLine}
+                        onChange={(e) => {
+                          setAssemblyLine(e.target.value);
+                          if (andonModalLineError) setAndonModalLineError('');
+                        }}
+                        placeholder="Nhập vị trí / bàn máy nhận (Bắt buộc)..."
+                        className={`w-full flex-1 px-3 py-2.5 rounded-xl font-extrabold text-xs outline-hidden border-2 ${
+                          andonModalLineError
+                            ? 'bg-rose-50 border-rose-500 text-rose-950 focus:ring-2 focus:ring-rose-500'
+                            : 'bg-blue-50 border-blue-400 text-blue-950 focus:ring-2 focus:ring-blue-500'
+                        }`}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setIsCustomLineMode(true)}
+                        className="px-2.5 py-2.5 bg-amber-100 hover:bg-amber-200 text-amber-900 rounded-xl text-[11px] font-extrabold shrink-0 cursor-pointer"
+                      >
+                        ✏️ Sửa Chi Tiết
+                      </button>
+                    </div>
+                  )}
+                  {andonModalLineError && (
+                    <p className="text-[11px] font-extrabold text-rose-600 mt-1">
+                      ⚠️ {andonModalLineError}
+                    </p>
+                  )}
                 </div>
               </div>
 

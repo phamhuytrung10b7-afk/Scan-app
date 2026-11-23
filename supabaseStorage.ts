@@ -41,6 +41,7 @@ export const STORAGE_KEYS = {
   MANUALLY_COMPLETED_VOUCHERS: 'thekho_manually_completed_vouchers_v1',
   DELETED_CALL_IDS: 'thekho_deleted_call_ids_v1',
   DELETED_BOM_VOUCHER_CODES: 'thekho_deleted_bom_voucher_codes_v1',
+  DELETED_PART_CODES: 'thekho_deleted_part_codes_v1',
 };
 
 // Egress bandwidth savings tracker (for diagnostics & verification)
@@ -704,6 +705,85 @@ export const supabaseRelationalStore = {
     }
   },
 
+  /**
+   * Fetches ALL parts from relational `parts` table with automatic 1000-row pagination
+   * (prevents Supabase PostgREST 1000-row default truncation).
+   */
+  async selectAllParts(): Promise<Part[] | null> {
+    try {
+      const { client, isConfigured } = getActiveSupabaseClient();
+      if (!isConfigured || !client) return null;
+
+      const allParts: Part[] = [];
+      const pageSize = 1000;
+      let page = 0;
+
+      while (page < 20) {
+        const { data, error } = await client
+          .from('parts')
+          .select('id, code, name, group_name, unit, current_stock, qty_ng, min_stock, max_stock, location, locations, unit_price, supplier, notes, created_at, updated_at')
+          .order('updated_at', { ascending: false })
+          .range(page * pageSize, (page + 1) * pageSize - 1);
+
+        if (error) {
+          logSupabaseError('selectAllParts', error);
+          return page === 0 ? null : allParts;
+        }
+        if (!data || data.length === 0) break;
+        allParts.push(...data.map(mapSupabaseRowToPart));
+        if (data.length < pageSize) break;
+        page++;
+      }
+
+      return allParts;
+    } catch (err) {
+      logSupabaseError('selectAllParts catch', err);
+      return null;
+    }
+  },
+
+  /**
+   * Lightweight query of relational `parts` table for Kho NG reconciliation (returns id, code, qtyNg, updatedAt only).
+   */
+  async selectPartsNgSummary(): Promise<Array<{ id: string; code: string; qtyNg: number; updatedAt: string }> | null> {
+    try {
+      const { client, isConfigured } = getActiveSupabaseClient();
+      if (!isConfigured || !client) return null;
+
+      const result: Array<{ id: string; code: string; qtyNg: number; updatedAt: string }> = [];
+      const pageSize = 1000;
+      let page = 0;
+
+      while (page < 20) {
+        const { data, error } = await client
+          .from('parts')
+          .select('id, code, qty_ng, updated_at')
+          .range(page * pageSize, (page + 1) * pageSize - 1);
+
+        if (error) {
+          logSupabaseError('selectPartsNgSummary', error);
+          return page === 0 ? null : result;
+        }
+        if (!data || data.length === 0) break;
+        for (const row of data as any[]) {
+          result.push({
+            id: String(row.id || ''),
+            code: String(row.code || ''),
+            qtyNg: typeof row.qty_ng === 'number' ? row.qty_ng : Number(row.qty_ng) || 0,
+            updatedAt: String(row.updated_at || ''),
+          });
+        }
+        if (data.length < pageSize) break;
+        page++;
+      }
+
+      return result;
+    } catch (err) {
+      logSupabaseError('selectPartsNgSummary catch', err);
+      return null;
+    }
+  },
+
   async insertPart(part: Part): Promise<boolean> {
     try {
       const { client, isConfigured } = getActiveSupabaseClient();
@@ -721,14 +801,20 @@ export const supabaseRelationalStore = {
     }
   },
 
-  async upsertParts(parts: Part[]): Promise<boolean> {
+  async upsertParts(parts: Part[], options?: { preserveExistingQtyNg?: boolean }): Promise<boolean> {
     try {
       const { client, isConfigured } = getActiveSupabaseClient();
       if (!isConfigured || !client) return false;
       if (!parts || parts.length === 0) return true;
 
       const MAX_BATCH_SIZE = 150;
-      const rows = parts.map(mapPartToSupabaseRow);
+      const rows = parts.map((p) => {
+        const mapped: any = mapPartToSupabaseRow(p);
+        if (options?.preserveExistingQtyNg) {
+          delete mapped.qty_ng;
+        }
+        return mapped;
+      });
 
       for (let i = 0; i < rows.length; i += MAX_BATCH_SIZE) {
         const chunk = rows.slice(i, i + MAX_BATCH_SIZE);
@@ -769,6 +855,10 @@ export const supabaseRelationalStore = {
       if (updates.currentStock !== undefined) {
         rowUpdates.current_stock =
           typeof updates.currentStock === 'number' ? updates.currentStock : Number(updates.currentStock) || 0;
+      }
+      if (updates.qtyNg !== undefined) {
+        rowUpdates.qty_ng =
+          typeof updates.qtyNg === 'number' ? updates.qtyNg : Number(updates.qtyNg) || 0;
       }
       if (updates.minStock !== undefined) {
         rowUpdates.min_stock =
@@ -818,6 +908,29 @@ export const supabaseRelationalStore = {
       return true;
     } catch (err) {
       logSupabaseError('deletePartsBatch catch', err);
+      return false;
+    }
+  },
+
+  async deletePartsByCodes(codes: string[]): Promise<boolean> {
+    try {
+      const { client, isConfigured } = getActiveSupabaseClient();
+      if (!isConfigured || !client) return false;
+      const cleanCodes = Array.from(new Set((codes || []).map((c) => String(c || '').trim()).filter(Boolean)));
+      if (cleanCodes.length === 0) return true;
+
+      const MAX_BATCH_SIZE = 100;
+      for (let i = 0; i < cleanCodes.length; i += MAX_BATCH_SIZE) {
+        const chunk = cleanCodes.slice(i, i + MAX_BATCH_SIZE);
+        const { error } = await client.from('parts').delete().in('code', chunk);
+        if (error) {
+          logSupabaseError('deletePartsByCodes', error);
+          return false;
+        }
+      }
+      return true;
+    } catch (err) {
+      logSupabaseError('deletePartsByCodes catch', err);
       return false;
     }
   },
@@ -1196,6 +1309,205 @@ export const supabaseRelationalStore = {
 };
 
 /**
+ * Safely merge part updates into `thekho_app_data` (`thekho_parts_v1`) using Compare-And-Swap (`updated_at`)
+ * so concurrent writes across workstations never resurrect exported NG stock or clobber unrelated parts.
+ */
+export async function mergePartsKvWithCloud({
+  fallbackLocalParts,
+  partsToUpsert = [],
+  partIdsToDelete = [],
+  partCodesToDelete = [],
+  preserveCloudQtyNg = false,
+}: {
+  fallbackLocalParts: Part[];
+  partsToUpsert?: Part[];
+  partIdsToDelete?: string[];
+  partCodesToDelete?: string[];
+  preserveCloudQtyNg?: boolean;
+}): Promise<{ success: boolean; mergedParts: Part[] }> {
+  const { client, isConfigured } = getActiveSupabaseClient();
+  const deleteIdSet = new Set((partIdsToDelete || []).filter(Boolean));
+  const deleteCodeSet = new Set(
+    (partCodesToDelete || []).map((c) => String(c || '').trim().toLowerCase()).filter(Boolean)
+  );
+  const upsertById = new Map<string, Part>();
+  const upsertByCode = new Map<string, Part>();
+
+  for (const p of partsToUpsert) {
+    if (!p || !p.id) continue;
+    const codeKey = p.code ? p.code.trim().toLowerCase() : '';
+    if (deleteIdSet.has(p.id) || (codeKey && deleteCodeSet.has(codeKey))) continue;
+    upsertById.set(p.id, p);
+    if (codeKey) upsertByCode.set(codeKey, p);
+  }
+
+  // Read tombstoned deleted part codes from localStorage so stale devices cannot resurrect intentionally deleted parts
+  let tombstoneCodeSet = new Set<string>();
+  try {
+    const rawTomb = localStorage.getItem(STORAGE_KEYS.DELETED_PART_CODES);
+    if (rawTomb) {
+      const decomp = decompressStorageValue(rawTomb) || rawTomb;
+      const parsed = JSON.parse(decomp);
+      if (Array.isArray(parsed)) {
+        tombstoneCodeSet = new Set(parsed.map((c: any) => String(c || '').trim().toLowerCase()).filter(Boolean));
+      }
+    }
+  } catch (_) {}
+
+  const mergeWithBase = (baseList: Part[]): Part[] => {
+    const mergedByCode = new Map<string, Part>();
+    const noCodeMap = new Map<string, Part>();
+
+    const isDeleted = (p: Part): boolean => {
+      if (!p || !p.id) return true;
+      const cKey = p.code ? p.code.trim().toLowerCase() : '';
+      if (deleteIdSet.has(p.id)) return true;
+      if (cKey && deleteCodeSet.has(cKey)) return true;
+      // Never resurrect tombstoned code unless it is being explicitly upserted right now
+      if (cKey && tombstoneCodeSet.has(cKey) && !upsertByCode.has(cKey) && !upsertById.has(p.id)) return true;
+      return false;
+    };
+
+    // 1. Seed with authoritative Cloud base (preserving every part added on any device!)
+    for (const cp of baseList) {
+      if (isDeleted(cp)) continue;
+      const cKey = cp.code ? cp.code.trim().toLowerCase() : '';
+      if (cKey) {
+        if (!mergedByCode.has(cKey)) mergedByCode.set(cKey, cp);
+      } else {
+        noCodeMap.set(cp.id, cp);
+      }
+    }
+
+    // 2. Include any local parts missing from cloud (e.g., newly created locally before sync)
+    for (const lp of fallbackLocalParts) {
+      if (isDeleted(lp)) continue;
+      const cKey = lp.code ? lp.code.trim().toLowerCase() : '';
+      if (cKey) {
+        if (!mergedByCode.has(cKey)) {
+          mergedByCode.set(cKey, lp);
+        }
+      } else if (!noCodeMap.has(lp.id)) {
+        noCodeMap.set(lp.id, lp);
+      }
+    }
+
+    // 3. Apply explicit upserts onto base
+    for (const [id, incoming] of upsertById.entries()) {
+      const cKey = incoming.code ? incoming.code.trim().toLowerCase() : '';
+      const existing = (cKey ? mergedByCode.get(cKey) : undefined) || noCodeMap.get(id);
+
+      if (existing) {
+        const finalQtyNg = preserveCloudQtyNg
+          ? typeof existing.qtyNg === 'number'
+            ? existing.qtyNg
+            : Number((existing as any).qty_ng || existing.qtyNg) || 0
+          : typeof incoming.qtyNg === 'number'
+          ? incoming.qtyNg
+          : Number((incoming as any).qty_ng || incoming.qtyNg) || 0;
+
+        const mergedItem: Part = {
+          ...existing,
+          ...incoming,
+          id: existing.id,
+          qtyNg: finalQtyNg,
+        };
+        if (cKey) {
+          mergedByCode.set(cKey, mergedItem);
+        } else {
+          noCodeMap.set(existing.id, mergedItem);
+        }
+      } else {
+        if (cKey) {
+          mergedByCode.set(cKey, incoming);
+        } else {
+          noCodeMap.set(id, incoming);
+        }
+      }
+    }
+
+    return [...Array.from(mergedByCode.values()), ...Array.from(noCodeMap.values())];
+  };
+
+  if (!isConfigured || !client) {
+    const localMerged = mergeWithBase(fallbackLocalParts);
+    setLocalCacheData(STORAGE_KEYS.PARTS, localMerged, new Date().toISOString());
+    return { success: true, mergedParts: localMerged };
+  }
+
+  let lastCloudParts: Part[] | null = null;
+
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      const { data: row, error: fetchErr } = await client
+        .from('thekho_app_data')
+        .select('data, updated_at')
+        .eq('key', STORAGE_KEYS.PARTS)
+        .maybeSingle();
+
+      if (fetchErr) {
+        logSupabaseError('mergePartsKvWithCloud fetch', fetchErr);
+        await new Promise((r) => setTimeout(r, 75 * (attempt + 1)));
+        continue;
+      }
+
+      const cloudParts = Array.isArray(row?.data) ? (row.data as Part[]) : [];
+      if (cloudParts.length > 0) {
+        lastCloudParts = cloudParts;
+      }
+      const prevUpdatedAt = row?.updated_at ? String(row.updated_at) : null;
+      const baseList = cloudParts.length > 0 ? cloudParts : fallbackLocalParts;
+      const finalMerged = mergeWithBase(baseList);
+      const nextIso = new Date().toISOString();
+
+      if (prevUpdatedAt) {
+        const { data: updatedRows, error: updErr } = await client
+          .from('thekho_app_data')
+          .update({ data: finalMerged, updated_at: nextIso })
+          .eq('key', STORAGE_KEYS.PARTS)
+          .eq('updated_at', prevUpdatedAt)
+          .select('updated_at');
+
+        if (!updErr && updatedRows && updatedRows.length > 0) {
+          setLocalCacheData(STORAGE_KEYS.PARTS, finalMerged, String(updatedRows[0].updated_at || nextIso));
+          return { success: true, mergedParts: finalMerged };
+        }
+        if (updErr) {
+          logSupabaseError('mergePartsKvWithCloud CAS update', updErr);
+        }
+        // Contention detected: brief jitter backoff before next CAS retry
+        await new Promise((r) => setTimeout(r, 75 * (attempt + 1) + Math.floor(Math.random() * 60)));
+      } else {
+        const { data: upsertedRows, error: upsErr } = await client
+          .from('thekho_app_data')
+          .upsert([{ key: STORAGE_KEYS.PARTS, data: finalMerged, updated_at: nextIso }], { onConflict: 'key' })
+          .select('updated_at');
+
+        if (!upsErr) {
+          const ts = upsertedRows?.[0]?.updated_at ? String(upsertedRows[0].updated_at) : nextIso;
+          setLocalCacheData(STORAGE_KEYS.PARTS, finalMerged, ts);
+          return { success: true, mergedParts: finalMerged };
+        }
+        logSupabaseError('mergePartsKvWithCloud upsert', upsErr);
+      }
+    } catch (err) {
+      logSupabaseError('mergePartsKvWithCloud attempt catch', err);
+      await new Promise((r) => setTimeout(r, 80 * (attempt + 1)));
+    }
+  }
+
+  // CRITICAL: NEVER blindly overwrite Cloud with stale local-only list!
+  // Only write if we successfully fetched Cloud data and merged against it.
+  if (lastCloudParts && lastCloudParts.length > 0) {
+    const safeMerged = mergeWithBase(lastCloudParts);
+    const ok = await supabaseKeyStore.set(STORAGE_KEYS.PARTS, safeMerged);
+    return { success: ok, mergedParts: safeMerged };
+  }
+
+  return { success: false, mergedParts: mergeWithBase(fallbackLocalParts) };
+}
+
+/**
  * Batch Processing Engine for Kho NG:
  * Executes Atomic Batch updates for Parts and Transactions in a single command,
  * with ZERO Realtime overhead, ensuring high performance and data integrity.
@@ -1206,7 +1518,7 @@ export async function batchExecuteNgTransaction({
 }: {
   partsToUpdate: Part[];
   transactionsToInsert: Transaction[];
-}): Promise<{ success: boolean; message?: string }> {
+}): Promise<{ success: boolean; message?: string; mergedParts?: Part[]; insertedTransactions?: Transaction[] }> {
   const { client, isConfigured } = getActiveSupabaseClient();
 
   // 1. Update local cache immediately
@@ -1234,46 +1546,57 @@ export async function batchExecuteNgTransaction({
   setLocalCacheData(STORAGE_KEYS.PARTS, mergedParts, nowIso);
 
   // 2. Batch Processing to Supabase Cloud
+  let finalMergedParts = mergedParts;
   if (isConfigured && client) {
-    try {
-      // 2.1 Gom toàn bộ các bản ghi giao dịch mới vào mảng transactionsToInsert và gửi trong 1 lệnh duy nhất:
-      if (transactionsToInsert && transactionsToInsert.length > 0) {
-        const txRows = transactionsToInsert.map(mapTransactionToSupabaseRow);
-        const { error: txErr } = await client.from('transactions').insert(txRows);
-        if (txErr) {
-          logSupabaseError('batchExecuteNgTransaction insert transactions', txErr);
-        }
+    // 2.1 Insert NG transactions atomically
+    if (transactionsToInsert && transactionsToInsert.length > 0) {
+      invalidateTransactionMemoryCache();
+      const txRows = transactionsToInsert.map(mapTransactionToSupabaseRow);
+      const { error: txErr } = await client.from('transactions').upsert(txRows, { onConflict: 'id' });
+      if (txErr) {
+        logSupabaseError('batchExecuteNgTransaction insert transactions', txErr);
+        throw new Error(`Không thể lưu lịch sử giao dịch Kho NG lên Supabase: ${txErr.message || 'Lỗi mạng'}`);
       }
-
-      // 2.2 Gom toàn bộ dữ liệu linh kiện cần cập nhật lại tồn kho vào mảng partsToUpdate và gửi trong 1 lệnh duy nhất:
-      if (partsToUpdate && partsToUpdate.length > 0) {
-        const partRows = partsToUpdate.map(mapPartToSupabaseRow);
-        const { error: partErr } = await client.from('parts').upsert(partRows, { onConflict: 'id' });
-        if (partErr) {
-          logSupabaseError('batchExecuteNgTransaction upsert parts', partErr);
-          // If qty_ng column missing on remote table, fallback without qty_ng for relational parts table
-          if (String(partErr.message || '').includes('qty_ng')) {
-            const rowsFallback = partRows.map((r: any) => {
-              const copy = { ...r };
-              delete copy.qty_ng;
-              return copy;
-            });
-            await client.from('parts').upsert(rowsFallback, { onConflict: 'id' });
-          }
-        }
-      }
-
-      // 2.3 Cập nhật đồng bộ thêm bảng thekho_app_data trong 1 lệnh upsert duy nhất (Cloud Source of Truth):
-      await client.from('thekho_app_data').upsert(
-        [
-          { key: STORAGE_KEYS.PARTS, data: mergedParts, updated_at: nowIso },
-        ],
-        { onConflict: 'key' }
-      );
-    } catch (cloudErr) {
-      logSupabaseError('batchExecuteNgTransaction catch', cloudErr);
     }
+
+    // 2.2 Upsert relational `parts` rows (authoritative `qty_ng` storage)
+    if (partsToUpdate && partsToUpdate.length > 0) {
+      const partRows = partsToUpdate.map(mapPartToSupabaseRow);
+      const { error: partErr } = await client.from('parts').upsert(partRows, { onConflict: 'id' });
+      if (partErr) {
+        logSupabaseError('batchExecuteNgTransaction upsert parts', partErr);
+        // If qty_ng column missing on remote table, fallback without qty_ng for relational parts table
+        if (String(partErr.message || '').includes('qty_ng')) {
+          const rowsFallback = partRows.map((r: any) => {
+            const copy = { ...r };
+            delete copy.qty_ng;
+            return copy;
+          });
+          const { error: fallbackErr } = await client.from('parts').upsert(rowsFallback, { onConflict: 'id' });
+          if (fallbackErr) {
+            throw new Error(`Không thể cập nhật tồn Kho NG trên bảng parts: ${fallbackErr.message || 'Lỗi Supabase'}`);
+          }
+        } else {
+          throw new Error(`Không thể cập nhật tồn Kho NG trên bảng parts: ${partErr.message || 'Lỗi Supabase'}`);
+        }
+      }
+    }
+
+    // 2.3 Atomically merge onto `thekho_app_data` (`thekho_parts_v1`) via CAS so concurrent devices never resurrect old qtyNg
+    const kvRes = await mergePartsKvWithCloud({
+      fallbackLocalParts: mergedParts,
+      partsToUpsert: partsToUpdate,
+      preserveCloudQtyNg: false,
+    });
+    if (!kvRes.success) {
+      throw new Error('Không thể đồng bộ danh sách linh kiện Kho NG lên Supabase Cloud (thekho_parts_v1). Vui lòng thử lại!');
+    }
+    finalMergedParts = kvRes.mergedParts;
   }
 
-  return { success: true };
+  return {
+    success: true,
+    mergedParts: finalMergedParts,
+    insertedTransactions: transactionsToInsert,
+  };
 }
